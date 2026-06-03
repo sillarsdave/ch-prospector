@@ -532,7 +532,12 @@ def run_job(job):
         ws.freeze_panes = "A2"
 
         ws_acct = wb.create_sheet("Accountants")
-        acct_counts = Counter(r for r in df["Accountant"].tolist() if r and str(r).strip())
+        ACCT_EXCLUDE = {"audit exempt", "auditexempt", "audit-exempt", "exempt", "n/a", "none", "not applicable"}
+        acct_counts = Counter(r for r in df["Accountant"].tolist()
+                              if r and str(r).strip()
+                              and str(r).strip().lower() not in ACCT_EXCLUDE
+                              and "audit exempt" not in str(r).lower()
+                              and len(str(r).strip()) > 3)
         for ci, h in enumerate(["Accountant Firm","No. of Clients","Companies"], 1):
             cell = ws_acct.cell(row=1, column=ci, value=h)
             cell.fill = PatternFill("solid", fgColor="1a4a2e")
