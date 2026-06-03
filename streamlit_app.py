@@ -7,49 +7,21 @@ import io
 import re
 import redis
 import json
+import base64
 from base64 import b64encode
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
-
-# ─── Logging setup ───────────────────────────────────────────────────────────
-import logging
+import os
 import traceback
 from datetime import datetime
 
 _log_buffer = []
-_log_lock = threading.Lock() if 'threading' in dir() else None
-
-def log_event(level, msg, exc=None):
-    import threading as _threading
-    ts = datetime.now().strftime("%H:%M:%S")
-    entry = f"[{ts}] {level}: {msg}"
-    if exc:
-        entry += f"\n  ERROR: {exc}\n  {traceback.format_exc().strip()}"
-    with _threading.Lock():
-        _log_buffer.append(entry)
-        if len(_log_buffer) > 500:
-            _log_buffer.pop(0)
 
 def get_log_text():
     return "\n".join(_log_buffer)
 
-def send_error_email(gmail_user, gmail_pass, email_to, subject, body):
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        msg = MIMEText(body)
-        msg["From"] = gmail_user
-        msg["To"] = email_to
-        msg["Subject"] = subject
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_pass)
-            server.sendmail(gmail_user, email_to, msg.as_string())
-    except:
-        pass
-
 def get_redis():
-    import os
     return redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"))
 
 # ─── Page config ─────────────────────────────────────────────────────────────
@@ -73,15 +45,6 @@ st.markdown("""
         font-size: 1.4rem;
         font-weight: bold;
     }
-    .metric-box {
-        background: white;
-        border: 1px solid #e0e8e0;
-        border-radius: 6px;
-        padding: 0.6rem 1rem;
-        text-align: center;
-    }
-    .metric-label { font-size: 0.75rem; color: #6b6960; font-family: Georgia, serif; }
-    .metric-value { font-size: 1.1rem; color: #1a4a2e; font-weight: bold; font-family: Courier, monospace; }
     div[data-testid="stSidebar"] { background: white; }
     .stButton > button {
         background: #1a4a2e;
@@ -155,7 +118,6 @@ class RateLimiter:
         self.window = window
         self.calls = deque()
         self.lock = threading.Lock()
-        self.paused = False
 
     def record_call(self):
         with self.lock:
@@ -173,10 +135,8 @@ class RateLimiter:
         while True:
             count = self.calls_in_window()
             if count < self.max_calls:
-                self.paused = False
                 self.record_call()
                 return
-            self.paused = True
             with self.lock:
                 wait_time = (self.calls[0] + self.window) - time.time() + 0.1 if self.calls else 1
             time.sleep(max(0.1, wait_time))
@@ -198,14 +158,10 @@ def fmt_currency(val):
     if val is None: return ""
     try:
         v = float(val)
-        if abs(v) >= 1_000_000:
-            return f"\u00a3{v/1_000_000:.1f}m"
-        elif abs(v) >= 1_000:
-            return f"\u00a3{v/1_000:.0f}k"
-        else:
-            return f"\u00a3{v:.0f}"
-    except:
-        return ""
+        if abs(v) >= 1_000_000: return f"\u00a3{v/1_000_000:.1f}m"
+        elif abs(v) >= 1_000:   return f"\u00a3{v/1_000:.0f}k"
+        else:                    return f"\u00a3{v:.0f}"
+    except: return ""
 
 def title_case_company(name):
     if not name: return name
@@ -269,8 +225,7 @@ def fetch_financials(company_number, api_key):
         meta = dm.json()
         doc_url = meta.get("links",{}).get("document","")
         if not doc_url: return result
-        resources = meta.get("resources",{})
-        if "application/xhtml+xml" not in resources: return result
+        if "application/xhtml+xml" not in meta.get("resources",{}): return result
         doc_r = requests.get(doc_url, headers={**headers,"Accept":"application/xhtml+xml"}, timeout=25)
         if doc_r.status_code != 200: return result
         soup = BeautifulSoup(doc_r.content, "html.parser")
@@ -328,11 +283,9 @@ def fetch_financials(company_number, api_key):
             full_text = soup.get_text(separator=" ", strip=True)
             accountant = ""
             SUFFIXES = r"(?:LLP|Chartered Accountants|Certified Accountants|Chartered Certified Accountants|& Co(?:\.|mpany)?|Accountants)"
-            trigger_pat = (
-                r"(?:prepared by|statutory auditors?|reporting accountants?|"
-                r"independent auditors?|audited by|accounts? (?:have been )?prepared by)"
-                r"[:\s]+([A-Z][A-Za-z0-9 &,\.\-]{2,50}?" + SUFFIXES + r")"
-            )
+            trigger_pat = (r"(?:prepared by|statutory auditors?|reporting accountants?|"
+                          r"independent auditors?|audited by|accounts? (?:have been )?prepared by)"
+                          r"[:\s]+([A-Z][A-Za-z0-9 &,\.\-]{2,50}?" + SUFFIXES + r")")
             m = _re.search(trigger_pat, full_text)
             if m:
                 accountant = m.group(1).strip().rstrip(".,")
@@ -340,24 +293,22 @@ def fetch_financials(company_number, api_key):
                 fallback_pat = r"([A-Z][A-Za-z0-9 &,\.\-]{2,50}?" + SUFFIXES + r")"
                 for m in _re.finditer(fallback_pat, full_text):
                     candidate = m.group(1).strip().rstrip(".,")
-                    skip = ["the company", "the directors", "companies house", "hmrc",
-                            "limited company", "association of", "institute of",
-                            "liability partnership", "recruitment", "staffing",
-                            "employment", "personnel", "limited liability"]
-                    if any(s in candidate.lower() for s in skip):
-                        continue
+                    skip = ["the company","the directors","companies house","hmrc",
+                            "limited company","association of","institute of",
+                            "liability partnership","recruitment","staffing",
+                            "employment","personnel","limited liability"]
+                    if any(s in candidate.lower() for s in skip): continue
                     if len(candidate) > 4:
                         accountant = candidate
                         break
             if accountant:
                 accountant = accountant.split("|")[0].strip()
-                for prefix in ["Pages For Filing With Registrar ", "PAGES FOR FILING WITH REGISTRAR "]:
+                for prefix in ["Pages For Filing With Registrar ","PAGES FOR FILING WITH REGISTRAR "]:
                     if accountant.startswith(prefix):
                         accountant = accountant[len(prefix):]
                 accountant = accountant.strip()[:60]
             result["accountant"] = accountant
-        except:
-            pass
+        except: pass
     except: pass
     return result
 
@@ -391,9 +342,7 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
     headers = {"Authorization": auth}
     params_base = {**base_params}
     if sic_code: params_base["sic_codes"] = sic_code
-    items = []
-    start = 0
-    total = None
+    items = []; start = 0; total = None
     while True:
         params = {**params_base, "size": 100, "start_index": start}
         _rate_limiter.wait_if_needed()
@@ -409,63 +358,54 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
         if start >= (total or 0) or start >= 5000: break
     return items
 
-def send_email_results(gmail_user, gmail_pass, email_to, excel_buf, csv_data, search_date, criteria):
+def send_email_results(gmail_user, gmail_pass, email_to, excel_bytes, csv_data, search_date, criteria):
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.base import MIMEBase
     from email.mime.text import MIMEText
     from email import encoders
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = gmail_user
-        msg["To"] = email_to
-        msg["Subject"] = f"Companies House Prospector Results — {search_date}"
-        body_lines = ["Your Companies House Prospector search has completed.", ""]
-        for k, v in criteria.items():
-            body_lines.append(f"{k}: {v}")
-        body_lines.append("Please find the Excel and CSV results attached.")
-        msg.attach(MIMEText("\n".join(body_lines), "plain"))
-        part_xl = MIMEBase("application", "octet-stream")
-        part_xl.set_payload(excel_buf)
-        encoders.encode_base64(part_xl)
-        part_xl.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.xlsx"')
-        msg.attach(part_xl)
-        part_csv = MIMEBase("application", "octet-stream")
-        part_csv.set_payload(csv_data.encode("utf-8-sig"))
-        encoders.encode_base64(part_csv)
-        part_csv.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.csv"')
-        msg.attach(part_csv)
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_pass)
-            server.sendmail(gmail_user, email_to, msg.as_string())
-        return True
-    except Exception as e:
-        return str(e)
+    msg = MIMEMultipart()
+    msg["From"] = gmail_user
+    msg["To"] = email_to
+    msg["Subject"] = f"Companies House Prospector Results — {search_date}"
+    body_lines = ["Your Companies House Prospector search has completed.", ""]
+    for k, v in criteria.items():
+        body_lines.append(f"{k}: {v}")
+    body_lines.append("")
+    body_lines.append("Please find the Excel and CSV results attached.")
+    msg.attach(MIMEText("\n".join(body_lines), "plain"))
+    part_xl = MIMEBase("application","octet-stream")
+    part_xl.set_payload(excel_bytes)
+    encoders.encode_base64(part_xl)
+    part_xl.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.xlsx"')
+    msg.attach(part_xl)
+    part_csv = MIMEBase("application","octet-stream")
+    part_csv.set_payload(csv_data.encode("utf-8-sig"))
+    encoders.encode_base64(part_csv)
+    part_csv.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.csv"')
+    msg.attach(part_csv)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(gmail_user, gmail_pass)
+        server.sendmail(gmail_user, email_to, msg.as_string())
 
-# ─── Streamlit UI ─────────────────────────────────────────────────────────────
-
+# ─── UI ───────────────────────────────────────────────────────────────────────
 st.markdown('<div class="main-header">\U0001f3e2 Companies House Prospector</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown("### \U0001f511 API Key")
-    import os
     try:
         api_key = st.secrets.get("CH_API_KEY") or os.environ.get("CH_API_KEY","")
-        if api_key:
-            st.success("API key loaded ✅")
+        if api_key: st.success("API key loaded ✅")
         else:
             api_key = st.text_input("Companies House API Key", type="password",
-                                     value=st.session_state.get("api_key",""),
-                                     placeholder="Paste your API key here")
+                                     value=st.session_state.get("api_key",""))
             if api_key: st.session_state["api_key"] = api_key
     except:
         api_key = os.environ.get("CH_API_KEY","")
-        if api_key:
-            st.success("API key loaded ✅")
+        if api_key: st.success("API key loaded ✅")
         else:
             api_key = st.text_input("Companies House API Key", type="password",
-                                     value=st.session_state.get("api_key",""),
-                                     placeholder="Paste your API key here")
+                                     value=st.session_state.get("api_key",""))
             if api_key: st.session_state["api_key"] = api_key
 
     st.markdown("---")
@@ -479,7 +419,7 @@ with st.sidebar:
         gmail_pass = os.environ.get("GMAIL_APP_PASSWORD","")
         email_configured = bool(gmail_user and gmail_pass)
     send_email = st.checkbox("Email results when complete", value=email_configured)
-    email_to = st.text_input("Send to", value="david.sillars@quilterfa.com", placeholder="your@email.com")
+    email_to = st.text_input("Send to", value="david.sillars@quilterfa.com")
 
     st.markdown("---")
     st.markdown("### \U0001f4cd Location")
@@ -518,16 +458,11 @@ with st.sidebar:
     search_btn = st.button("\U0001f50d Search Companies House", use_container_width=True)
     if st.button("🗑 Clear Results", use_container_width=True):
         st.session_state.results = []
-        st.session_state.director_cache = {}
-        st.session_state.financials_cache = {}
         st.rerun()
 
-# ─── Main area ────────────────────────────────────────────────────────────────
-
+# ─── Main ─────────────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
     st.session_state.results = []
-    st.session_state.director_cache = {}
-    st.session_state.financials_cache = {}
 
 if search_btn:
     if not api_key:
@@ -565,12 +500,15 @@ if search_btn:
             _r = get_redis()
             _r.set("ch_job", json.dumps(job))
             _r.delete("ch_status")
-            st.success(f"✅ Search queued! You will receive results by email at **{email_to}** when complete. You can now close this browser.")
+            _r.delete("ch_results_excel")
+            _r.delete("ch_results_csv")
+            _r.delete("ch_results_meta")
+            st.success(f"✅ Search queued! Results will be emailed to **{email_to}** when complete. You can close this browser.")
             st.info(f"Searching: **{location}** | **{len(selected_sic_labels)}** industries | **{len(selected_sics)}** SIC codes")
         except Exception as e:
             st.error(f"Failed to queue search: {e}")
 
-# ─── Background job status ───────────────────────────────────────────────────
+# ─── Background job status + email trigger ────────────────────────────────────
 _status = {}
 try:
     _r = get_redis()
@@ -594,15 +532,44 @@ if _status.get("running"):
     )
     time.sleep(5)
     st.rerun()
-elif _status.get("error"):
-    st.error(f"⚠️ Last search failed: {_status.get('error')}")
+
+elif _status.get("ready_to_email") and not _status.get("email_sent"):
+    # Results ready — send email from Streamlit (has outbound network access)
+    try:
+        _r = get_redis()
+        _meta_raw = _r.get("ch_results_meta")
+        _excel_b64 = _r.get("ch_results_excel")
+        _csv_data = _r.get("ch_results_csv")
+
+        if _meta_raw and _excel_b64 and _csv_data:
+            _meta = json.loads(_meta_raw)
+            _excel_bytes = base64.b64decode(_excel_b64)
+            send_email_results(
+                gmail_user, gmail_pass,
+                _meta["email_to"],
+                _excel_bytes,
+                _csv_data,
+                _meta["search_date"],
+                _meta["criteria"]
+            )
+            # Mark as sent
+            _status["email_sent"] = True
+            _status["ready_to_email"] = False
+            _r.set("ch_status", json.dumps(_status))
+            st.success(f"✅ Search complete — {_meta.get('results_count',0):,} results emailed to {_meta['email_to']}")
+        else:
+            st.warning("Results ready but files missing from Redis — please re-run search.")
+    except Exception as e:
+        st.error(f"⚠️ Search complete but email failed: {e}")
+
 elif _status.get("email_sent"):
     st.success(f"✅ Last search complete — {_status.get('results_count',0):,} results emailed.")
 
+elif _status.get("error"):
+    st.error(f"⚠️ Last search failed: {_status.get('error')}")
+
 # ─── Results display ──────────────────────────────────────────────────────────
 results = st.session_state.get("results",[])
-director_cache = st.session_state.get("director_cache",{})
-financials_cache = st.session_state.get("financials_cache",{})
 
 if results:
     st.markdown(f"### {len(results):,} results loaded")
@@ -621,15 +588,14 @@ if results:
                 y,m2,d2 = inc.split("-")
                 age = str((date.today()-date(int(y),int(m2),int(d2))).days//365)
             except: pass
-        fin = financials_cache.get(num,{})
+        fin = st.session_state.get("financials_cache",{}).get(num,{})
         score = calc_score(fin)
         score_str = "\u2605" * min(score,5) if score > 0 else "\u2606"
-        dirs = director_cache.get(num,[])
+        dirs = st.session_state.get("director_cache",{}).get(num,[])
         if one_per_company and dirs: dirs = dirs[:1]
         rows_data = dirs if dirs else [None]
         for o in rows_data:
-            name = ""
-            appt = ""
+            name = appt = ""
             if o:
                 name = " ".join(reversed([p.strip() for p in o.get("name","").split(",")]))
                 appt = o.get("appointed_on","")
@@ -640,7 +606,7 @@ if results:
                 "Score": score_str, "First Name": first_n, "Surname": last_n,
                 "Company": company_name, "Number": num, "Address": addr_str,
                 "SIC": sics,
-                "Category": ", ".join([l.split("(")[0].strip() for l in selected_sic_labels if any(s in sics for s in [sic_codes[sic_labels.index(l)]])]) or ", ".join(selected_sic_labels[:1]).split("(")[0].strip(),
+                "Category": ", ".join([l.split("(")[0].strip() for l in selected_sic_labels if any(s in sics for s in [sic_codes[sic_labels.index(l)]])]) or "",
                 "Incorporated": inc, "Age": age,
                 "Total Assets": fin.get("total_assets",""), "Net Assets": fin.get("net_assets",""),
                 "Fixed Assets": fin.get("fixed_assets",""), "Current Assets": fin.get("current_assets",""),
@@ -651,17 +617,12 @@ if results:
 
     import pandas as pd
     df = pd.DataFrame(rows)
-
     display_df = df.copy()
     display_df["CH company"] = display_df["CH Link"]
     display_df["Officers"] = display_df["CH Link"].apply(lambda x: x + "/officers" if x else "")
     display_df = display_df.drop(columns=["CH Link"])
 
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        height=600,
-        hide_index=True,
+    st.dataframe(display_df, use_container_width=True, height=600, hide_index=True,
         column_config={
             "Score": st.column_config.TextColumn("★ Score", width=80),
             "First Name": st.column_config.TextColumn("First Name", width=100),
@@ -684,137 +645,66 @@ if results:
             "CH company": st.column_config.LinkColumn("CH Company", width=90, display_text="Open"),
             "Officers": st.column_config.LinkColumn("Officers", width=80, display_text="Officers"),
             "LinkedIn": st.column_config.LinkColumn("LinkedIn", width=80, display_text="Search"),
-        }
-    )
+        })
 
     def _make_filename(ext):
         loc = location.strip().replace(" ","").lower()[:10]
-        cats = "_".join([
-            l.split("(")[0].strip().replace(" ","").lower()[:8]
-            for l in selected_sic_labels[:2]
-        ]) if selected_sic_labels else "all"
-        cats = cats[:20]
-        d = date.today().strftime("%d%m%y")
-        return f"{loc}_{cats}_{d}.{ext}"
+        cats = "_".join([l.split("(")[0].strip().replace(" ","").lower()[:8]
+                         for l in selected_sic_labels[:2]]) if selected_sic_labels else "all"
+        return f"{loc}_{cats[:20]}_{date.today().strftime('%d%m%y')}.{ext}"
 
     st.markdown("---")
-    col_a, col_b, col_c = st.columns([1,1,2])
-
+    col_a, col_b, _ = st.columns([1,1,2])
     with col_a:
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font, PatternFill, Alignment
             from openpyxl.utils import get_column_letter
             from collections import Counter
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Prospects"
-            base_cols = [c for c in df.columns if c not in ["CH Link", "LinkedIn"]]
-            headers_xl = base_cols + ["CH company", "Officers", "LinkedIn"]
+            wb = Workbook(); ws = wb.active; ws.title = "Prospects"
+            base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"]]
+            headers_xl = base_cols + ["CH company","Officers","LinkedIn"]
             hdr_fill = PatternFill("solid", fgColor="1a4a2e")
-            hdr_font = Font(name="Arial", color="FFFFFF", bold=True, size=10)
             for i, h in enumerate(headers_xl, 1):
                 cell = ws.cell(row=1, column=i, value=h)
                 cell.fill = hdr_fill
-                cell.font = hdr_font
+                cell.font = Font(name="Arial", color="FFFFFF", bold=True, size=10)
                 cell.alignment = Alignment(horizontal="center", wrap_text=True)
             ws.row_dimensions[1].height = 30
-            fill_even = PatternFill("solid", fgColor="EBF3FB")
-            fill_odd  = PatternFill("solid", fgColor="FFFFFF")
             for rn, (_, row) in enumerate(df.iterrows(), 2):
-                fill = fill_even if rn % 2 == 0 else fill_odd
+                fill = PatternFill("solid", fgColor="EBF3FB") if rn%2==0 else PatternFill("solid", fgColor="FFFFFF")
                 row_vals = [row[c] for c in base_cols] + [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
                 for ci, val in enumerate(row_vals, 1):
                     cell = ws.cell(row=rn, column=ci, value=val)
-                    cell.fill = fill
-                    cell.font = Font(name="Arial", size=9)
+                    cell.fill = fill; cell.font = Font(name="Arial", size=9)
                     cell.alignment = Alignment(horizontal="left", vertical="center")
                     if ci > len(base_cols):
-                        labels = ["Open", "Officers", "LinkedIn"]
-                        cell.value = labels[ci - len(base_cols) - 1]
+                        labels = ["Open","Officers","LinkedIn"]
+                        cell.value = labels[ci-len(base_cols)-1]
                         cell.hyperlink = val
                         cell.font = Font(name="Arial", size=9, color="0563C1", underline="single")
             for ci, h in enumerate(headers_xl, 1):
                 col_letter = get_column_letter(ci)
-                max_len = len(str(h))
-                for rn in range(2, ws.max_row + 1):
-                    v = ws.cell(row=rn, column=ci).value
-                    if v: max_len = max(max_len, len(str(v)))
-                ws.column_dimensions[col_letter].width = min(max(max_len + 2, 8), 40)
+                max_len = max(len(str(h)), max((len(str(ws.cell(row=rn,column=ci).value or "")) for rn in range(2,ws.max_row+1)), default=0))
+                ws.column_dimensions[col_letter].width = min(max(max_len+2,8),40)
             ws.auto_filter.ref = ws.dimensions
             ws.freeze_panes = "A2"
-
-            ws_acct = wb.create_sheet("Accountants")
-            acct_counts = Counter(r for r in df["Accountant"].tolist() if r and str(r).strip())
-            ws_acct.cell(row=1, column=1, value="Accountant Firm").font = Font(bold=True, name="Arial", size=10)
-            ws_acct.cell(row=1, column=2, value="No. of Clients").font = Font(bold=True, name="Arial", size=10)
-            ws_acct.cell(row=1, column=3, value="Companies").font = Font(bold=True, name="Arial", size=10)
-            ws_acct.row_dimensions[1].height = 20
-            for cell in ws_acct[1]:
-                cell.fill = PatternFill("solid", fgColor="1a4a2e")
-                cell.font = Font(bold=True, name="Arial", size=10, color="FFFFFF")
-                cell.alignment = Alignment(horizontal="center")
-            acct_companies = {}
-            for _, row in df.iterrows():
-                acct = str(row.get("Accountant","")).strip()
-                if acct:
-                    acct_companies.setdefault(acct, [])
-                    co = str(row.get("Company","")).strip()
-                    if co and co not in acct_companies[acct]:
-                        acct_companies[acct].append(co)
-            for rn, (acct, count) in enumerate(acct_counts.most_common(), 2):
-                fill = PatternFill("solid", fgColor="EBF3FB") if rn % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
-                ws_acct.cell(row=rn, column=1, value=acct).font = Font(name="Arial", size=9)
-                ws_acct.cell(row=rn, column=2, value=count).font = Font(name="Arial", size=9)
-                ws_acct.cell(row=rn, column=3, value=", ".join(acct_companies.get(acct,[]))).font = Font(name="Arial", size=9)
-                for ci in range(1, 4):
-                    ws_acct.cell(row=rn, column=ci).fill = fill
-            ws_acct.column_dimensions["A"].width = 40
-            ws_acct.column_dimensions["B"].width = 14
-            ws_acct.column_dimensions["C"].width = 60
-            ws_acct.auto_filter.ref = f"A1:C{ws_acct.max_row}"
-
-            ws2 = wb.create_sheet("Search Criteria")
-            crit = st.session_state.get("search_criteria",{})
-            for i, (k,v) in enumerate(crit.items(), 1):
-                ws2.cell(row=i, column=1, value=k).font = Font(bold=True, name="Arial")
-                ws2.cell(row=i, column=2, value=str(v)).font = Font(name="Arial")
-            ws2.column_dimensions["A"].width = 22
-            ws2.column_dimensions["B"].width = 50
-
-            buf = io.BytesIO()
-            wb.save(buf)
-            buf.seek(0)
-            st.download_button(
-                "\u2b07 Download Excel",
-                data=buf.getvalue(),
-                file_name=_make_filename("xlsx"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+            st.download_button("\u2b07 Download Excel", data=buf.getvalue(),
+                               file_name=_make_filename("xlsx"),
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
         except Exception as e:
             st.error(f"Excel error: {e}")
 
     with col_b:
         df_csv = df.copy()
         df_csv["CH company"] = df["CH Link"]
-        df_csv["Officers"] = df["CH Link"].apply(lambda x: x + "/officers")
+        df_csv["Officers"] = df["CH Link"].apply(lambda x: x+"/officers")
         df_csv["LinkedIn search"] = df["LinkedIn"]
         df_csv = df_csv.drop(columns=["CH Link","LinkedIn"])
-        csv_data = df_csv.to_csv(index=False)
-        st.download_button(
-            "\u2b07 Download CSV",
-            data=csv_data.encode("utf-8-sig"),
-            file_name=_make_filename("csv"),
-            mime="text/csv",
-            use_container_width=True
-        )
+        st.download_button("\u2b07 Download CSV", data=df_csv.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=_make_filename("csv"), mime="text/csv", use_container_width=True)
 
 else:
     st.info("Configure your filters in the sidebar and click **Search Companies House** to begin.")
-
-if _log_buffer:
-    with st.expander(f"🔍 Event log ({len(_log_buffer)} entries)", expanded=False):
-        st.code(get_log_text(), language=None)
-        if st.button("Clear log"):
-            _log_buffer.clear()

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Background worker — runs permanently on Railway.
-Picks up search jobs from Redis, runs them, emails results.
-Completely independent of the Streamlit browser session.
+Picks up search jobs from Redis, runs them, saves results back to Redis.
+Streamlit then sends the email (it has outbound network access).
 """
 import json
 import os
@@ -25,14 +25,12 @@ def get_redis():
 
 API_BASE = "https://api.company-information.service.gov.uk"
 
-# ── Rate limiter ──────────────────────────────────────────────────────────────
 class RateLimiter:
     def __init__(self, max_calls=575, window=300):
         self.max_calls = max_calls
         self.window = window
         self.calls = deque()
         self.lock = threading.Lock()
-        self.paused = False
 
     def record_call(self):
         with self.lock:
@@ -50,10 +48,8 @@ class RateLimiter:
         while True:
             count = self.calls_in_window()
             if count < self.max_calls:
-                self.paused = False
                 self.record_call()
                 return
-            self.paused = True
             with self.lock:
                 wait_time = (self.calls[0] + self.window) - time.time() + 0.1 if self.calls else 1
             time.sleep(max(0.1, wait_time))
@@ -281,40 +277,8 @@ def write_status(status):
     except Exception as e:
         print(f"[{datetime.now()}] Status write error: {e}")
 
-def send_results_email(gmail_user, gmail_pass, email_to, excel_buf, csv_data, search_date, criteria):
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.base import MIMEBase
-    from email.mime.text import MIMEText
-    from email import encoders
-    msg = MIMEMultipart()
-    msg["From"] = gmail_user
-    msg["To"] = email_to
-    msg["Subject"] = f"Companies House Prospector Results — {search_date}"
-    body_lines = ["Your Companies House Prospector search has completed.", ""]
-    for k, v in criteria.items():
-        body_lines.append(f"{k}: {v}")
-    body_lines.append("")
-    body_lines.append("Please find the Excel and CSV results attached.")
-    msg.attach(MIMEText("\n".join(body_lines), "plain"))
-    part_xl = MIMEBase("application","octet-stream")
-    part_xl.set_payload(excel_buf)
-    encoders.encode_base64(part_xl)
-    part_xl.add_header("Content-Disposition", f'attachment; filename="prospector_{search_date}.xlsx"')
-    msg.attach(part_xl)
-    part_csv = MIMEBase("application","octet-stream")
-    part_csv.set_payload(csv_data.encode("utf-8-sig"))
-    encoders.encode_base64(part_csv)
-    part_csv.add_header("Content-Disposition", f'attachment; filename="prospector_{search_date}.csv"')
-    msg.attach(part_csv)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(gmail_user, gmail_pass)
-        server.sendmail(gmail_user, email_to, msg.as_string())
-
 def run_job(job):
     api_key        = os.environ.get("CH_API_KEY","")
-    gmail_user     = os.environ.get("GMAIL_USER","")
-    gmail_pass     = os.environ.get("GMAIL_APP_PASSWORD","")
     email_to       = job.get("email_to","")
     location       = job.get("location","Surrey")
     selected_sics  = job.get("sic_codes",[])
@@ -329,9 +293,9 @@ def run_job(job):
     one_per_co     = job.get("one_per_company", True)
     company_types  = job.get("company_types", ["ltd","llp"])
 
-    write_status({"running": True, "stage": "Fetching companies...", "dir_done": 0, "fin_done": 0,
-                  "total": 0, "started_at": time.time(), "error": None})
-
+    write_status({"running": True, "stage": "Fetching companies...", "dir_done": 0,
+                  "fin_done": 0, "total": 0, "started_at": time.time(), "error": None,
+                  "ready_to_email": False})
     try:
         base_params = {"location": location, "company_status": "active"}
         if company_types: base_params["company_type"] = ",".join(company_types)
@@ -361,11 +325,13 @@ def run_job(job):
         total = len(all_items)
 
         write_status({"running": True, "stage": f"Loading directors and financials for {total:,} companies...",
-                      "dir_done": 0, "fin_done": 0, "total": total, "started_at": time.time(), "error": None})
+                      "dir_done": 0, "fin_done": 0, "total": total,
+                      "started_at": time.time(), "error": None, "ready_to_email": False})
 
         director_cache = {}; financials_cache = {}
         dir_lock = threading.Lock(); fin_lock = threading.Lock()
         dir_done = [0]; fin_done = [0]
+        start_time = time.time()
 
         def fetch_dir(c):
             num = c.get("company_number","")
@@ -383,8 +349,6 @@ def run_job(job):
             if not num: return num, {}
             return num, fetch_financials(num, api_key)
 
-        start_time = time.time()
-
         def run_dirs():
             with ThreadPoolExecutor(max_workers=6) as ex:
                 for future in as_completed({ex.submit(fetch_dir,c):c for c in all_items}):
@@ -395,7 +359,8 @@ def run_job(job):
                     with dir_lock: dir_done[0] += 1
                     write_status({"running": True, "stage": "Loading directors and financials...",
                                   "dir_done": dir_done[0], "fin_done": fin_done[0],
-                                  "total": total, "started_at": start_time, "error": None})
+                                  "total": total, "started_at": start_time,
+                                  "error": None, "ready_to_email": False})
 
         def run_fins():
             if not fetch_fin_flag: return
@@ -414,7 +379,8 @@ def run_job(job):
 
         write_status({"running": True, "stage": "Building results...",
                       "dir_done": dir_done[0], "fin_done": fin_done[0],
-                      "total": total, "started_at": start_time, "error": None})
+                      "total": total, "started_at": start_time,
+                      "error": None, "ready_to_email": False})
 
         def sort_key(c):
             fin = financials_cache.get(c.get("company_number",""),{})
@@ -493,11 +459,13 @@ def run_job(job):
                     "CH Link": ch_url, "LinkedIn": li_url,
                 })
 
+        # Build Excel
         import pandas as pd
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils import get_column_letter
         from collections import Counter
+        import base64
 
         df = pd.DataFrame(rows)
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
@@ -564,6 +532,7 @@ def run_job(job):
 
         xl_buf = io.BytesIO(); wb.save(xl_buf); xl_buf.seek(0)
 
+        # Build CSV
         csv_df = df.copy()
         csv_df["CH company"] = df["CH Link"]
         csv_df["Officers"] = df["CH Link"].apply(lambda x: x+"/officers")
@@ -571,28 +540,31 @@ def run_job(job):
         csv_df = csv_df.drop(columns=["CH Link","LinkedIn"])
         csv_str = csv_df.to_csv(index=False)
 
+        # Save results to Redis for Streamlit to pick up and email
         search_date = today.strftime("%d %B %Y")
-        send_results_email(gmail_user, gmail_pass, email_to,
-                           xl_buf.getvalue(), csv_str, search_date, criteria)
+        r = get_redis()
+        r.set("ch_results_excel", base64.b64encode(xl_buf.getvalue()).decode())
+        r.set("ch_results_csv", csv_str)
+        r.set("ch_results_meta", json.dumps({
+            "search_date": search_date,
+            "criteria": criteria,
+            "results_count": len(rows),
+            "email_to": email_to,
+        }))
 
-        write_status({"running": False, "stage": "Complete", "dir_done": dir_done[0],
-                      "fin_done": fin_done[0], "total": total,
-                      "started_at": start_time, "completed_at": time.time(),
-                      "email_sent": True, "results_count": len(rows), "error": None})
+        # Signal complete — Streamlit will send the email
+        write_status({"running": False, "stage": "Complete",
+                      "dir_done": dir_done[0], "fin_done": fin_done[0],
+                      "total": total, "started_at": start_time,
+                      "completed_at": time.time(), "results_count": len(rows),
+                      "ready_to_email": True, "email_sent": False, "error": None})
+
+        print(f"[{datetime.now()}] Job complete — {len(rows)} results saved to Redis for emailing")
 
     except Exception as e:
         write_status({"running": False, "stage": "Error", "error": str(e),
-                      "traceback": traceback.format_exc()})
-        try:
-            import smtplib
-            from email.mime.text import MIMEText
-            msg = MIMEText(f"Search failed with error:\n\n{traceback.format_exc()}")
-            msg["From"] = gmail_user; msg["To"] = email_to
-            msg["Subject"] = "Companies House Prospector — Search Failed"
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(gmail_user, gmail_pass)
-                server.sendmail(gmail_user, email_to, msg.as_string())
-        except: pass
+                      "traceback": traceback.format_exc(), "ready_to_email": False})
+        print(f"[{datetime.now()}] Job error: {e}")
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -606,7 +578,6 @@ if __name__ == "__main__":
         print(f"[{datetime.now()}] Redis connection failed: {e}")
 
     last_job_id = None
-
     while True:
         try:
             r = get_redis()
@@ -621,5 +592,4 @@ if __name__ == "__main__":
                     print(f"[{datetime.now()}] Job {job_id} complete")
         except Exception as e:
             print(f"[{datetime.now()}] Worker loop error: {e}")
-
         time.sleep(3)
