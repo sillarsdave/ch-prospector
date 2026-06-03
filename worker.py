@@ -596,46 +596,111 @@ def run_job(job):
 
         sg_key = os.environ.get("SENDGRID_API_KEY", "")
         from_email = "sillarsdave@gmail.com"
+        SIZE_LIMIT = 20 * 1024 * 1024  # 20MB
 
-        try:
+        def build_excel(row_subset, part_label=""):
+            """Build Excel workbook for a subset of rows, return bytes."""
+            from openpyxl import Workbook as WB2
+            from openpyxl.styles import Font as F2, PatternFill as PF2, Alignment as AL2
+            from openpyxl.utils import get_column_letter as gcl2
+            from collections import Counter as C2
+            sub_df = pd.DataFrame(row_subset)
+            wb2 = WB2(); ws2 = wb2.active
+            ws2.title = "Prospects"
+            base_cols2 = [c for c in sub_df.columns if c not in ["CH Link","LinkedIn"]]
+            headers2 = base_cols2 + ["CH company","Officers","LinkedIn"]
+            hf2 = PF2("solid", fgColor="1a4a2e")
+            for i, h in enumerate(headers2, 1):
+                cell = ws2.cell(row=1, column=i, value=h)
+                cell.fill = hf2
+                cell.font = F2(name="Arial", color="FFFFFF", bold=True, size=10)
+                cell.alignment = AL2(horizontal="center", wrap_text=True)
+            ws2.row_dimensions[1].height = 30
+            fe2 = PF2("solid", fgColor="EBF3FB"); fo2 = PF2("solid", fgColor="FFFFFF")
+            for rn, (_, row) in enumerate(sub_df.iterrows(), 2):
+                fill = fe2 if rn%2==0 else fo2
+                rv = [row[c] for c in base_cols2] + [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
+                for ci, val in enumerate(rv, 1):
+                    cell = ws2.cell(row=rn, column=ci, value=val)
+                    cell.fill = fill; cell.font = F2(name="Arial", size=9)
+                    cell.alignment = AL2(horizontal="left", vertical="center")
+                    if ci > len(base_cols2):
+                        lbls = ["Open","Officers","LinkedIn"]
+                        cell.value = lbls[ci-len(base_cols2)-1]
+                        cell.hyperlink = val
+                        cell.font = F2(name="Arial", size=9, color="0563C1", underline="single")
+            for ci, h in enumerate(headers2, 1):
+                col_letter = gcl2(ci)
+                max_len = max(len(str(h)), max((len(str(ws2.cell(row=rn2,column=ci).value or "")) for rn2 in range(2,ws2.max_row+1)), default=0))
+                ws2.column_dimensions[col_letter].width = min(max(max_len+2,8),40)
+            ws2.auto_filter.ref = ws2.dimensions
+            ws2.freeze_panes = "A2"
+            # Criteria sheet
+            wsc = wb2.create_sheet("Search Criteria")
+            crit2 = {**criteria, "Part": part_label} if part_label else criteria
+            for i, (k,v) in enumerate(crit2.items(), 1):
+                wsc.cell(row=i, column=1, value=k).font = F2(bold=True, name="Arial")
+                wsc.cell(row=i, column=2, value=str(v)).font = F2(name="Arial")
+            buf2 = io.BytesIO(); wb2.save(buf2); buf2.seek(0)
+            return buf2.getvalue()
+
+        def send_sg(to_email, subject, body_text, xl_bytes, csv_bytes, date_str, part=""):
             import sendgrid as sg_module
             from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
-
-            body_lines = ["Your Companies House Prospector search has completed.", ""]
-            for k, v in criteria.items():
-                body_lines.append(f"{k}: {v}")
-            body_lines.append("")
-            body_lines.append("Please find the Excel and CSV results attached.")
-
-            body_text = "\n".join(body_lines)
-            message = Mail(
-                from_email=from_email,
-                to_emails=email_to,
-                subject=f"Companies House Prospector Results — {search_date}",
-                plain_text_content=body_text
-            )
-
-            encoded_xl = base64.b64encode(xl_buf.getvalue()).decode()
-            message.attachment = Attachment(
-                FileContent(encoded_xl),
-                FileName(f"prospector_results_{search_date}.xlsx"),
+            suffix = f"_part{part}" if part else ""
+            msg = Mail(from_email=from_email, to_emails=to_email,
+                       subject=subject, plain_text_content=body_text)
+            msg.attachment = Attachment(FileContent(base64.b64encode(xl_bytes).decode()),
+                FileName(f"prospector_results_{date_str}{suffix}.xlsx"),
                 FileType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-                Disposition("attachment")
-            )
-
-            csv_bytes = csv_str.encode("utf-8-sig")
-            encoded_csv = base64.b64encode(csv_bytes).decode()
-            message.attachment = Attachment(
-                FileContent(encoded_csv),
-                FileName(f"prospector_results_{search_date}.csv"),
-                FileType("text/csv"),
-                Disposition("attachment")
-            )
-
+                Disposition("attachment"))
+            if csv_bytes:
+                msg.attachment = Attachment(FileContent(base64.b64encode(csv_bytes).decode()),
+                    FileName(f"prospector_results_{date_str}{suffix}.csv"),
+                    FileType("text/csv"), Disposition("attachment"))
             sg_client = sg_module.SendGridAPIClient(api_key=sg_key)
-            response = sg_client.send(message)
-            email_sent = response.status_code in (200, 202)
-            print(f"[{datetime.now()}] Email sent via SendGrid: {response.status_code}")
+            resp = sg_client.send(msg)
+            return resp.status_code in (200, 202)
+
+        try:
+            xl_bytes = xl_buf.getvalue()
+            csv_bytes = csv_str.encode("utf-8-sig")
+            total_size = len(xl_bytes) + len(csv_bytes)
+
+            body_base = ["Your Companies House Prospector search has completed.", ""]
+            for k, v in criteria.items():
+                body_base.append(f"{k}: {v}")
+            body_base.append("")
+
+            if total_size <= SIZE_LIMIT:
+                # Single email
+                body = "\n".join(body_base + ["Please find the Excel and CSV results attached."])
+                subject = f"Companies House Prospector Results — {search_date}"
+                email_sent = send_sg(email_to, subject, body, xl_bytes, csv_bytes, search_date)
+                print(f"[{datetime.now()}] Single email sent: {email_sent}")
+            else:
+                # Split into two parts
+                print(f"[{datetime.now()}] File size {total_size/1024/1024:.1f}MB > 20MB — splitting into 2 emails")
+                mid = len(rows) // 2
+                parts = [rows[:mid], rows[mid:]]
+                email_sent = True
+                for i, part_rows in enumerate(parts, 1):
+                    part_label = f"Part {i} of 2"
+                    part_xl = build_excel(part_rows, part_label)
+                    part_df = pd.DataFrame(part_rows)
+                    part_df2 = part_df.copy()
+                    part_df2["CH company"] = part_df["CH Link"]
+                    part_df2["Officers"] = part_df["CH Link"].apply(lambda x: x+"/officers")
+                    part_df2["LinkedIn search"] = part_df["LinkedIn"]
+                    part_df2 = part_df2.drop(columns=["CH Link","LinkedIn"])
+                    part_csv = part_df2.to_csv(index=False).encode("utf-8-sig")
+                    body = "\n".join(body_base + [f"This is {part_label} ({len(part_rows):,} results). Please find attached."])
+                    subject = f"Companies House Prospector Results — {search_date} ({part_label})"
+                    ok = send_sg(email_to, subject, body, part_xl, part_csv, search_date, str(i))
+                    if not ok:
+                        email_sent = False
+                    print(f"[{datetime.now()}] Part {i} email sent: {ok}")
+
         except Exception as email_err:
             email_sent = False
             print(f"[{datetime.now()}] Email error: {email_err}")
