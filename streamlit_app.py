@@ -358,35 +358,43 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
         if start >= (total or 0) or start >= 5000: break
     return items
 
-def send_email_results(gmail_user, gmail_pass, email_to, excel_bytes, csv_data, search_date, criteria):
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.base import MIMEBase
-    from email.mime.text import MIMEText
-    from email import encoders
-    msg = MIMEMultipart()
-    msg["From"] = gmail_user
-    msg["To"] = email_to
-    msg["Subject"] = f"Companies House Prospector Results — {search_date}"
+def send_email_results(email_to, excel_bytes, csv_data, search_date, criteria):
+    import sendgrid
+    from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
+    sg_key = os.environ.get("SENDGRID_API_KEY","")
+    from_email = "sillarsdave@gmail.com"
     body_lines = ["Your Companies House Prospector search has completed.", ""]
     for k, v in criteria.items():
         body_lines.append(f"{k}: {v}")
     body_lines.append("")
     body_lines.append("Please find the Excel and CSV results attached.")
-    msg.attach(MIMEText("\n".join(body_lines), "plain"))
-    part_xl = MIMEBase("application","octet-stream")
-    part_xl.set_payload(excel_bytes)
-    encoders.encode_base64(part_xl)
-    part_xl.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.xlsx"')
-    msg.attach(part_xl)
-    part_csv = MIMEBase("application","octet-stream")
-    part_csv.set_payload(csv_data if isinstance(csv_data, bytes) else csv_data.encode("utf-8-sig"))
-    encoders.encode_base64(part_csv)
-    part_csv.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.csv"')
-    msg.attach(part_csv)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(gmail_user, gmail_pass)
-        server.sendmail(gmail_user, email_to, msg.as_string())
+    message = Mail(
+        from_email=from_email,
+        to_emails=email_to,
+        subject=f"Companies House Prospector Results — {search_date}",
+        plain_text_content="\n".join(body_lines)
+    )
+    # Attach Excel
+    encoded_xl = base64.b64encode(excel_bytes).decode()
+    message.attachment = Attachment(
+        FileContent(encoded_xl),
+        FileName(f"prospector_results_{search_date}.xlsx"),
+        FileType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        Disposition("attachment")
+    )
+    # Attach CSV
+    csv_bytes = csv_data if isinstance(csv_data, bytes) else csv_data.encode("utf-8-sig")
+    encoded_csv = base64.b64encode(csv_bytes).decode()
+    message.attachment = Attachment(
+        FileContent(encoded_csv),
+        FileName(f"prospector_results_{search_date}.csv"),
+        FileType("text/csv"),
+        Disposition("attachment")
+    )
+    sg = sendgrid.SendGridAPIClient(api_key=sg_key)
+    response = sg.send(message)
+    if response.status_code not in (200, 202):
+        raise Exception(f"SendGrid error: {response.status_code} {response.body}")
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
 st.markdown('<div class="main-header">\U0001f3e2 Companies House Prospector</div>', unsafe_allow_html=True)
@@ -507,6 +515,21 @@ if search_btn:
             st.info(f"Searching: **{location}** | **{len(selected_sic_labels)}** industries | **{len(selected_sics)}** SIC codes")
         except Exception as e:
             st.error(f"Failed to queue search: {e}")
+
+# Auto-refresh every 5 seconds if a job is in progress or ready to email
+_auto_refresh = False
+try:
+    _r2 = get_redis()
+    _s2 = _r2.get("ch_status")
+    if _s2:
+        _s2j = json.loads(_s2)
+        if _s2j.get("running") or (_s2j.get("ready_to_email") and not _s2j.get("email_sent")):
+            _auto_refresh = True
+except:
+    pass
+if _auto_refresh:
+    time.sleep(5)
+    st.rerun()
 
 # ─── Background job status + email trigger ────────────────────────────────────
 _status = {}
