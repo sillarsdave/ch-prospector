@@ -507,7 +507,9 @@ if search_btn:
         try:
             _r = get_redis()
             _r.set("ch_job", json.dumps(job))
-            _r.delete("ch_status")
+            _r.set("ch_status", json.dumps({"running": False, "stage": "Queued",
+                "job_id": job["job_id"], "email_sent": False, "ready_to_email": False,
+                "error": None, "total": 0, "dir_done": 0, "fin_done": 0}))
             _r.delete("ch_results_excel")
             _r.delete("ch_results_csv")
             _r.delete("ch_results_meta")
