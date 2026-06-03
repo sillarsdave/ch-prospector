@@ -516,20 +516,6 @@ if search_btn:
         except Exception as e:
             st.error(f"Failed to queue search: {e}")
 
-# Auto-refresh every 5 seconds if a job is in progress or ready to email
-_auto_refresh = False
-try:
-    _r2 = get_redis()
-    _s2 = _r2.get("ch_status")
-    if _s2:
-        _s2j = json.loads(_s2)
-        if _s2j.get("running") or (_s2j.get("ready_to_email") and not _s2j.get("email_sent")):
-            _auto_refresh = True
-except:
-    pass
-if _auto_refresh:
-    time.sleep(5)
-    st.rerun()
 
 # ─── Background job status + email trigger ────────────────────────────────────
 _status = {}
@@ -568,7 +554,6 @@ elif _status.get("ready_to_email") and not _status.get("email_sent"):
             _meta = json.loads(_meta_raw)
             _excel_bytes = base64.b64decode(_excel_b64)
             send_email_results(
-                gmail_user, gmail_pass,
                 _meta["email_to"],
                 _excel_bytes,
                 _csv_data,
@@ -731,3 +716,15 @@ if results:
 
 else:
     st.info("Configure your filters in the sidebar and click **Search Companies House** to begin.")
+
+# ─── Always auto-refresh if job running or ready to email ─────────────────────
+try:
+    _ar = get_redis()
+    _ar_raw = _ar.get("ch_status")
+    if _ar_raw:
+        _ar_status = json.loads(_ar_raw)
+        if _ar_status.get("running") or (_ar_status.get("ready_to_email") and not _ar_status.get("email_sent")):
+            time.sleep(5)
+            st.rerun()
+except:
+    pass
