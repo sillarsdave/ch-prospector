@@ -589,8 +589,24 @@ def run_job(job):
         csv_df = csv_df.drop(columns=["CH Link","LinkedIn"])
         csv_str = csv_df.to_csv(index=False)
 
-        # Send email via SendGrid (HTTPS - works on Railway)
+        # Save results to Redis FIRST (download fallback, 7-day expiry)
         search_date = today.strftime("%d %B %Y")
+        try:
+            _r = get_redis()
+            _r.set("ch_results_excel", base64.b64encode(xl_buf.getvalue()).decode(), ex=604800)
+            _r.set("ch_results_csv", csv_str, ex=604800)
+            _r.set("ch_results_meta", json.dumps({
+                "search_date": search_date,
+                "results_count": len(rows),
+                "location": location,
+                "industries": ", ".join(sic_labels),
+                "job_id": job.get("job_id",""),
+            }), ex=604800)
+            print(f"[{datetime.now()}] Results saved to Redis for download")
+        except Exception as _re:
+            print(f"[{datetime.now()}] Redis save error: {_re}")
+
+        # Send email via SendGrid (HTTPS - works on Railway)
         criteria = {"Location": location, "Industries": ", ".join(sic_labels),
                     "Total results": len(rows), "Export date": search_date}
 

@@ -22,7 +22,7 @@ def get_log_text():
     return "\n".join(_log_buffer)
 
 def get_redis():
-    return redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"))
+    return redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -601,6 +601,38 @@ elif _status.get("email_sent"):
         _current_job = json.loads(get_redis().get("ch_job") or "{}")
         if _status.get("job_id") == _current_job.get("job_id"):
             st.success(f"✅ Search complete — {_status.get('results_count',0):,} results emailed.")
+    except:
+        pass
+
+    # Download fallback — show buttons if results are in Redis
+    try:
+        _r = get_redis()
+        _meta_raw = _r.get("ch_results_meta")
+        _excel_b64 = _r.get("ch_results_excel")
+        _csv_data = _r.get("ch_results_csv")
+        if _meta_raw and _excel_b64 and _csv_data:
+            _meta = json.loads(_meta_raw)
+            _date = _meta.get("search_date","results").replace(" ","_")
+            _loc = _meta.get("location","").replace(" ","").lower()[:10]
+            st.markdown("---")
+            st.markdown("**📥 Download results directly:**")
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    "⬇️ Download Excel",
+                    data=base64.b64decode(_excel_b64),
+                    file_name=f"prospector_{_loc}_{_date}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            with col_dl2:
+                st.download_button(
+                    "⬇️ Download CSV",
+                    data=_csv_data.encode("utf-8-sig"),
+                    file_name=f"prospector_{_loc}_{_date}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
     except:
         pass
 
