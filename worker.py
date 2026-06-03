@@ -668,11 +668,16 @@ if __name__ == "__main__":
             if data:
                 job = json.loads(data)
                 job_id = job.get("job_id")
-                if job_id and job_id != last_job_id:
+                submitted_at = job.get("submitted_at", 0)
+                age_hours = (time.time() - submitted_at) / 3600
+                if job_id and job_id != last_job_id and age_hours < 2:
                     last_job_id = job_id
                     print(f"[{datetime.now()}] New job: {job_id} — {job.get('location')} | {len(job.get('sic_codes',[]))} SIC codes")
                     run_job(job)
                     print(f"[{datetime.now()}] Job {job_id} complete")
+                elif job_id and age_hours >= 2:
+                    print(f"[{datetime.now()}] Skipping stale job {job_id} (age: {age_hours:.1f}h)")
+                    last_job_id = job_id  # Mark as seen so we don't keep logging it
         except Exception as e:
             print(f"[{datetime.now()}] Worker loop error: {e}")
         time.sleep(3)
