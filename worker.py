@@ -23,6 +23,14 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 def get_redis():
     return redis.from_url(REDIS_URL, decode_responses=True)
 
+def is_cancelled(job_id):
+    """Check if a cancel has been requested for this job."""
+    try:
+        r = get_redis()
+        return r.get("ch_cancel") == job_id
+    except:
+        return False
+
 API_BASE = "https://api.company-information.service.gov.uk"
 
 class RateLimiter:
@@ -293,9 +301,14 @@ def run_job(job):
     one_per_co     = job.get("one_per_company", True)
     company_types  = job.get("company_types", ["ltd","llp"])
 
+    # Clear any cancel flag from previous job
+    try:
+        get_redis().delete("ch_cancel")
+    except: pass
+
     write_status({"running": True, "stage": "Fetching companies...", "dir_done": 0,
                   "fin_done": 0, "total": 0, "started_at": time.time(), "error": None,
-                  "ready_to_email": False})
+                  "job_id": job.get("job_id",""), "ready_to_email": False})
     try:
         base_params = {"location": location, "company_status": "active"}
         if company_types: base_params["company_type"] = ",".join(company_types)
@@ -351,7 +364,11 @@ def run_job(job):
 
         def run_dirs():
             with ThreadPoolExecutor(max_workers=6) as ex:
-                for future in as_completed({ex.submit(fetch_dir,c):c for c in all_items}):
+                futures = {ex.submit(fetch_dir,c):c for c in all_items}
+                for future in as_completed(futures):
+                    if is_cancelled(job.get("job_id","")):
+                        print(f"[{datetime.now()}] Job cancelled during directors fetch")
+                        return
                     try:
                         num, active = future.result()
                         with dir_lock: director_cache[num] = active
@@ -360,12 +377,17 @@ def run_job(job):
                     write_status({"running": True, "stage": "Loading directors and financials...",
                                   "dir_done": dir_done[0], "fin_done": fin_done[0],
                                   "total": total, "started_at": start_time,
+                                  "job_id": job.get("job_id",""),
                                   "error": None, "ready_to_email": False})
 
         def run_fins():
             if not fetch_fin_flag: return
             with ThreadPoolExecutor(max_workers=3) as ex:
-                for future in as_completed({ex.submit(fetch_fin,c):c for c in all_items}):
+                futures = {ex.submit(fetch_fin,c):c for c in all_items}
+                for future in as_completed(futures):
+                    if is_cancelled(job.get("job_id","")):
+                        print(f"[{datetime.now()}] Job cancelled during financials fetch")
+                        return
                     try:
                         num, fin = future.result()
                         with fin_lock: financials_cache[num] = fin
@@ -377,9 +399,16 @@ def run_job(job):
         t1.start(); t2.start()
         t1.join(); t2.join()
 
+        if is_cancelled(job.get("job_id","")):
+            print(f"[{datetime.now()}] Job cancelled — skipping results and email")
+            write_status({"running": False, "stage": "Cancelled", "job_id": job.get("job_id",""),
+                          "error": None, "email_sent": False, "ready_to_email": False})
+            return
+
         write_status({"running": True, "stage": "Building results...",
                       "dir_done": dir_done[0], "fin_done": fin_done[0],
                       "total": total, "started_at": start_time,
+                      "job_id": job.get("job_id",""),
                       "error": None, "ready_to_email": False})
 
         def sort_key(c):
@@ -592,6 +621,7 @@ def run_job(job):
             print(f"[{datetime.now()}] Email error: {email_err}")
 
         write_status({"running": False, "stage": "Complete",
+                      "job_id": job.get("job_id",""),
                       "dir_done": dir_done[0], "fin_done": fin_done[0],
                       "total": total, "started_at": start_time,
                       "completed_at": time.time(), "results_count": len(rows),

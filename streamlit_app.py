@@ -506,6 +506,15 @@ if search_btn:
         }
         try:
             _r = get_redis()
+            # Cancel any currently running job before starting new one
+            try:
+                _old_status = _r.get("ch_status")
+                if _old_status:
+                    _old = json.loads(_old_status)
+                    if _old.get("running") and _old.get("job_id"):
+                        _r.set("ch_cancel", _old.get("job_id"))
+            except: pass
+
             _r.set("ch_job", json.dumps(job))
             _r.set("ch_status", json.dumps({"running": False, "stage": "Queued",
                 "job_id": job["job_id"], "email_sent": False, "ready_to_email": False,
@@ -561,7 +570,13 @@ if _status.get("running"):
     st.rerun()
 
 elif _status.get("email_sent"):
-    st.success(f"✅ Search complete — {_status.get('results_count',0):,} results emailed.")
+    # Only show if this status belongs to the current job
+    try:
+        _current_job = json.loads(get_redis().get("ch_job") or "{}")
+        if _status.get("job_id") == _current_job.get("job_id"):
+            st.success(f"✅ Search complete — {_status.get('results_count',0):,} results emailed.")
+    except:
+        pass
 
 elif _status.get("error"):
     st.error(f"⚠️ Last search failed: {_status.get('error')}")
