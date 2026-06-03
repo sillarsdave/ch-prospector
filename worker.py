@@ -447,7 +447,7 @@ def run_job(job):
                     appt = o.get("appointed_on","")
                 first_n, last_n = split_director_name(name)
                 ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
-                li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {company_name}")
+                li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {linkedin_company_keyword(company_name)}")
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
                     "Company": company_name, "Number": num, "Address": addr_str,
@@ -604,6 +604,21 @@ def run_job(job):
                       "traceback": traceback.format_exc(), "ready_to_email": False})
         print(f"[{datetime.now()}] Job error: {e}")
 
+
+
+def linkedin_company_keyword(company_name):
+    """Return first 1-2 meaningful words of company name for LinkedIn search.
+    Uses 2 words unless the second word is a legal suffix, in which case uses 1."""
+    if not company_name:
+        return ""
+    SUFFIXES = {"limited","ltd","llp","plc","and co","company","group",
+                "holdings","holding","services","solutions","consulting","consultancy",
+                "management","associates","partnership","enterprises","ventures",
+                "international","global","uk","the"}
+    orig_words = company_name.split()
+    if len(orig_words) >= 2 and orig_words[1].lower().rstrip(".") in SUFFIXES:
+        return orig_words[0]
+    return " ".join(orig_words[:min(2, len(orig_words))])
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

@@ -597,7 +597,16 @@ if results:
                 appt = o.get("appointed_on","")
             first_n, last_n = split_director_name(name)
             ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
-            li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {company_name}")
+            _sfx_set = {"limited","ltd","llp","plc","and co","company","group","holdings",
+                        "holding","services","solutions","consulting","consultancy",
+                        "management","associates","partnership","enterprises","ventures",
+                        "international","global","uk","the"}
+            _co_words = company_name.split() if company_name else []
+            if len(_co_words) >= 2 and _co_words[1].lower().rstrip(".") in _sfx_set:
+                co_keyword = _co_words[0]
+            else:
+                co_keyword = " ".join(_co_words[:min(2, len(_co_words))])
+            li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {co_keyword}")
             rows.append({
                 "Score": score_str, "First Name": first_n, "Surname": last_n,
                 "Company": company_name, "Number": num, "Address": addr_str,
