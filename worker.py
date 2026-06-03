@@ -553,8 +553,24 @@ def run_job(job):
         ws_acct.column_dimensions["C"].width = 60
 
         ws2 = wb.create_sheet("Search Criteria")
-        criteria = {"Location": location, "Industries": ", ".join(sic_labels),
-                    "Total results": len(rows), "Export date": today.strftime("%d %B %Y")}
+        _company_types_str = ", ".join([t.upper() for t in company_types]) if company_types else "All"
+        _age_str = f"{min_age}yr+" if min_age and not max_age else (f"{min_age}–{max_age}yrs" if min_age and max_age else "Any")
+        _emp_str = f"{emp_min}–{emp_max}" if (emp_min or emp_max) else "Any"
+        criteria = {
+            "Location": location,
+            "Industries": ", ".join(sic_labels),
+            "Company types": _company_types_str,
+            "Min age": _age_str,
+            "Exclude dormant": "Yes" if excl_dormant else "No",
+            "Min net assets": f"£{min_net_assets:,}" if min_net_assets else "None",
+            "Employees": _emp_str,
+            "Fetch financials": "Yes" if fetch_fin_flag else "No",
+            "One contact per company": "Yes" if one_per_co else "No",
+            "Companies found": f"{total:,}",
+            "After filters": f"{len(results):,}",
+            "Results in export": f"{len(rows):,}",
+            "Export date": today.strftime("%d %B %Y"),
+        }
         for i, (k,v) in enumerate(criteria.items(), 1):
             ws2.cell(row=i, column=1, value=k).font = Font(bold=True, name="Arial")
             ws2.cell(row=i, column=2, value=str(v)).font = Font(name="Arial")
