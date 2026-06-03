@@ -513,6 +513,8 @@ if search_btn:
             _r.delete("ch_results_meta")
             st.success(f"✅ Search queued! Results will be emailed to **{email_to}** when complete. You can close this browser.")
             st.info(f"Searching: **{location}** | **{len(selected_sic_labels)}** industries | **{len(selected_sics)}** SIC codes")
+            time.sleep(2)
+            st.rerun()
         except Exception as e:
             st.error(f"Failed to queue search: {e}")
 
@@ -542,36 +544,8 @@ if _status.get("running"):
     time.sleep(5)
     st.rerun()
 
-elif _status.get("ready_to_email") and not _status.get("email_sent"):
-    # Results ready — send email from Streamlit (has outbound network access)
-    try:
-        _r = get_redis()
-        _meta_raw = _r.get("ch_results_meta")
-        _excel_b64 = _r.get("ch_results_excel")
-        _csv_data = _r.get("ch_results_csv")
-
-        if _meta_raw and _excel_b64 and _csv_data:
-            _meta = json.loads(_meta_raw)
-            _excel_bytes = base64.b64decode(_excel_b64)
-            send_email_results(
-                _meta["email_to"],
-                _excel_bytes,
-                _csv_data,
-                _meta["search_date"],
-                _meta["criteria"]
-            )
-            # Mark as sent
-            _status["email_sent"] = True
-            _status["ready_to_email"] = False
-            _r.set("ch_status", json.dumps(_status))
-            st.success(f"✅ Search complete — {_meta.get('results_count',0):,} results emailed to {_meta['email_to']}")
-        else:
-            st.warning("Results ready but files missing from Redis — please re-run search.")
-    except Exception as e:
-        st.error(f"⚠️ Search complete but email failed: {e}")
-
 elif _status.get("email_sent"):
-    st.success(f"✅ Last search complete — {_status.get('results_count',0):,} results emailed.")
+    st.success(f"✅ Search complete — {_status.get('results_count',0):,} results emailed.")
 
 elif _status.get("error"):
     st.error(f"⚠️ Last search failed: {_status.get('error')}")

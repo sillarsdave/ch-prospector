@@ -540,26 +540,64 @@ def run_job(job):
         csv_df = csv_df.drop(columns=["CH Link","LinkedIn"])
         csv_str = csv_df.to_csv(index=False)
 
-        # Save results to Redis for Streamlit to pick up and email
+        # Send email via SendGrid (HTTPS - works on Railway)
         search_date = today.strftime("%d %B %Y")
-        r = get_redis()
-        r.set("ch_results_excel", base64.b64encode(xl_buf.getvalue()).decode())
-        r.set("ch_results_csv", csv_str)
-        r.set("ch_results_meta", json.dumps({
-            "search_date": search_date,
-            "criteria": criteria,
-            "results_count": len(rows),
-            "email_to": email_to,
-        }))
+        criteria = {"Location": location, "Industries": ", ".join(sic_labels),
+                    "Total results": len(rows), "Export date": search_date}
 
-        # Signal complete — Streamlit will send the email
+        sg_key = os.environ.get("SENDGRID_API_KEY", "")
+        from_email = "sillarsdave@gmail.com"
+
+        try:
+            import sendgrid as sg_module
+            from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
+
+            body_lines = ["Your Companies House Prospector search has completed.", ""]
+            for k, v in criteria.items():
+                body_lines.append(f"{k}: {v}")
+            body_lines.append("")
+            body_lines.append("Please find the Excel and CSV results attached.")
+
+            body_text = "\n".join(body_lines)
+            message = Mail(
+                from_email=from_email,
+                to_emails=email_to,
+                subject=f"Companies House Prospector Results — {search_date}",
+                plain_text_content=body_text
+            )
+
+            encoded_xl = base64.b64encode(xl_buf.getvalue()).decode()
+            message.attachment = Attachment(
+                FileContent(encoded_xl),
+                FileName(f"prospector_results_{search_date}.xlsx"),
+                FileType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                Disposition("attachment")
+            )
+
+            csv_bytes = csv_str.encode("utf-8-sig")
+            encoded_csv = base64.b64encode(csv_bytes).decode()
+            message.attachment = Attachment(
+                FileContent(encoded_csv),
+                FileName(f"prospector_results_{search_date}.csv"),
+                FileType("text/csv"),
+                Disposition("attachment")
+            )
+
+            sg_client = sg_module.SendGridAPIClient(api_key=sg_key)
+            response = sg_client.send(message)
+            email_sent = response.status_code in (200, 202)
+            print(f"[{datetime.now()}] Email sent via SendGrid: {response.status_code}")
+        except Exception as email_err:
+            email_sent = False
+            print(f"[{datetime.now()}] Email error: {email_err}")
+
         write_status({"running": False, "stage": "Complete",
                       "dir_done": dir_done[0], "fin_done": fin_done[0],
                       "total": total, "started_at": start_time,
                       "completed_at": time.time(), "results_count": len(rows),
-                      "ready_to_email": True, "email_sent": False, "error": None})
+                      "ready_to_email": False, "email_sent": email_sent, "error": None})
 
-        print(f"[{datetime.now()}] Job complete — {len(rows)} results saved to Redis for emailing")
+        print(f"[{datetime.now()}] Job complete — {len(rows)} results, email_sent={email_sent}")
 
     except Exception as e:
         write_status({"running": False, "stage": "Error", "error": str(e),
