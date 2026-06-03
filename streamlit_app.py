@@ -380,7 +380,7 @@ def send_email_results(gmail_user, gmail_pass, email_to, excel_bytes, csv_data, 
     part_xl.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.xlsx"')
     msg.attach(part_xl)
     part_csv = MIMEBase("application","octet-stream")
-    part_csv.set_payload(csv_data.encode("utf-8-sig"))
+    part_csv.set_payload(csv_data if isinstance(csv_data, bytes) else csv_data.encode("utf-8-sig"))
     encoders.encode_base64(part_csv)
     part_csv.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.csv"')
     msg.attach(part_csv)
