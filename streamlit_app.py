@@ -535,12 +535,26 @@ if _status.get("running"):
     _total = _status.get("total", 0)
     _d = _status.get("dir_done", 0)
     _fn = _status.get("fin_done", 0)
-    st.info(
-        f"🔄 **Search running in background**\n\n"
-        f"Stage: {_status.get('stage', '...')}\n\n"
-        f"Directors: {_d:,}/{_total:,} | Financials: {_fn:,}/{_total:,} | Elapsed: {_elapsed_str}\n\n"
-        f"✉️ Results will be emailed when complete. You can close this browser safely."
-    )
+    _stage = _status.get("stage", "...")
+
+    st.markdown("### 🔍 Search running in background")
+    st.caption(f"Stage: {_stage} | Elapsed: {_elapsed_str}")
+
+    if _total > 0:
+        # Directors progress
+        _dir_pct = min(_d / _total, 1.0)
+        st.markdown(f"**Directors** — {_d:,} of {_total:,}")
+        st.progress(_dir_pct)
+
+        # Financials progress
+        _fin_pct = min(_fn / _total, 1.0)
+        st.markdown(f"**Financials** — {_fn:,} of {_total:,}")
+        st.progress(_fin_pct)
+    else:
+        st.progress(0)
+        st.caption("Fetching company list...")
+
+    st.info("✉️ Results will be emailed when complete. You can safely close this browser.")
     time.sleep(5)
     st.rerun()
 
