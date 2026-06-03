@@ -549,6 +549,32 @@ if _status.get("running"):
     _stage = _status.get("stage", "...")
 
     st.markdown("### 🔍 Search running in background")
+    # Show what search is running
+    try:
+        _j = json.loads(get_redis().get("ch_job") or "{}")
+        _loc = _j.get("location", "")
+        _inds = ", ".join([l.split("(")[0].strip() for l in _j.get("sic_labels", [])])
+        _types = ", ".join([t.upper() for t in _j.get("company_types", [])]) or "All types"
+        _min_age = _j.get("min_age", 0)
+        _max_age = _j.get("max_age", 0)
+        _age_str = f"{_min_age}yr+" if _min_age and not _max_age else (f"{_min_age}-{_max_age}yrs" if _min_age and _max_age else "Any age")
+        _mna = _j.get("min_net_assets", 0)
+        _mna_str = f"£{_mna:,}+ net assets" if _mna else ""
+        _emp_min = _j.get("emp_min", 0)
+        _emp_max = _j.get("emp_max", 0)
+        _emp_str = f"{_emp_min}-{_emp_max} employees" if _emp_min or _emp_max else ""
+        _fin_str = "Financials on" if _j.get("fetch_financials") else "Financials off"
+        _dir_str = "1 contact per company" if _j.get("one_per_company") else "All directors"
+        _dormant_str = "Excl. dormant" if _j.get("excl_dormant") else "Incl. dormant"
+
+        _line1 = f"📍 {_loc} | 🏭 {_inds}"
+        _line2_parts = [_types, _age_str, _dormant_str, _fin_str, _dir_str]
+        if _mna_str: _line2_parts.append(_mna_str)
+        if _emp_str: _line2_parts.append(_emp_str)
+        _line2 = " | ".join(_line2_parts)
+        st.caption(_line1)
+        st.caption(f"⚙️ {_line2}")
+    except: pass
     st.caption(f"Stage: {_stage} | Elapsed: {_elapsed_str}")
 
     if _total > 0:
