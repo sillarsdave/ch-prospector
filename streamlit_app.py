@@ -5,6 +5,8 @@ import time
 import threading
 import io
 import re
+import redis
+import json
 from base64 import b64encode
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,7 +21,6 @@ _log_buffer = []
 _log_lock = threading.Lock() if 'threading' in dir() else None
 
 def log_event(level, msg, exc=None):
-    """Thread-safe logging to in-memory buffer."""
     import threading as _threading
     ts = datetime.now().strftime("%H:%M:%S")
     entry = f"[{ts}] {level}: {msg}"
@@ -27,7 +28,6 @@ def log_event(level, msg, exc=None):
         entry += f"\n  ERROR: {exc}\n  {traceback.format_exc().strip()}"
     with _threading.Lock():
         _log_buffer.append(entry)
-        # Keep last 500 entries
         if len(_log_buffer) > 500:
             _log_buffer.pop(0)
 
@@ -35,7 +35,6 @@ def get_log_text():
     return "\n".join(_log_buffer)
 
 def send_error_email(gmail_user, gmail_pass, email_to, subject, body):
-    """Send error/crash notification email."""
     try:
         import smtplib
         from email.mime.text import MIMEText
@@ -49,6 +48,10 @@ def send_error_email(gmail_user, gmail_pass, email_to, subject, body):
     except:
         pass
 
+def get_redis():
+    import os
+    return redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"))
+
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Companies House Prospector",
@@ -57,7 +60,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ─── Styling ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .stApp { background: #f7f6f2; }
@@ -92,7 +94,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Constants ────────────────────────────────────────────────────────────────
 API_BASE = "https://api.company-information.service.gov.uk"
 
 SIC_OPTIONS = [
@@ -147,8 +148,6 @@ SIC_OPTIONS = [
     ("Video production (59112)", "59112"),
     ("Vocational training (85320)", "85320"),
 ]
-
-# ─── Core functions (unchanged from desktop version) ─────────────────────────
 
 class RateLimiter:
     def __init__(self, max_calls=575, window=300):
@@ -324,16 +323,11 @@ def fetch_financials(company_number, api_key):
                         result["employees"] = str(v)
                         break
 
-        # Extract accountant/auditor name from iXBRL text
         try:
             import re as _re
             full_text = soup.get_text(separator=" ", strip=True)
             accountant = ""
-
-            # Known firm suffixes to anchor extraction
             SUFFIXES = r"(?:LLP|Chartered Accountants|Certified Accountants|Chartered Certified Accountants|& Co(?:\.|mpany)?|Accountants)"
-
-            # Priority: look for firm name after explicit trigger phrases
             trigger_pat = (
                 r"(?:prepared by|statutory auditors?|reporting accountants?|"
                 r"independent auditors?|audited by|accounts? (?:have been )?prepared by)"
@@ -343,11 +337,9 @@ def fetch_financials(company_number, api_key):
             if m:
                 accountant = m.group(1).strip().rstrip(".,")
             else:
-                # Fallback: find any firm with a known suffix
                 fallback_pat = r"([A-Z][A-Za-z0-9 &,\.\-]{2,50}?" + SUFFIXES + r")"
                 for m in _re.finditer(fallback_pat, full_text):
                     candidate = m.group(1).strip().rstrip(".,")
-                    # Skip obvious non-accountant matches
                     skip = ["the company", "the directors", "companies house", "hmrc",
                             "limited company", "association of", "institute of",
                             "liability partnership", "recruitment", "staffing",
@@ -357,17 +349,12 @@ def fetch_financials(company_number, api_key):
                     if len(candidate) > 4:
                         accountant = candidate
                         break
-
-            # Clean up: truncate at 60 chars, strip trailing junk
             if accountant:
-                # Remove anything after a pipe
                 accountant = accountant.split("|")[0].strip()
-                # Strip leading boilerplate words
                 for prefix in ["Pages For Filing With Registrar ", "PAGES FOR FILING WITH REGISTRAR "]:
                     if accountant.startswith(prefix):
                         accountant = accountant[len(prefix):]
                 accountant = accountant.strip()[:60]
-
             result["accountant"] = accountant
         except:
             pass
@@ -422,31 +409,6 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
         if start >= (total or 0) or start >= 5000: break
     return items
 
-# ─── Global job tracker ──────────────────────────────────────────────────────
-# Persists across Streamlit sessions on the same Railway container
-_job_status = {
-    "running": False,
-    "started_at": None,
-    "search_params": "",
-    "dir_done": 0,
-    "fin_done": 0,
-    "total": 0,
-    "completed": False,
-    "email_sent": False,
-    "error": None,
-}
-_job_lock = threading.Lock()
-
-def update_job(**kwargs):
-    with _job_lock:
-        _job_status.update(kwargs)
-
-def get_job():
-    with _job_lock:
-        return dict(_job_status)
-
-# ─── Email helper ────────────────────────────────────────────────────────────
-
 def send_email_results(gmail_user, gmail_pass, email_to, excel_buf, csv_data, search_date, criteria):
     import smtplib
     from email.mime.multipart import MIMEMultipart
@@ -458,28 +420,21 @@ def send_email_results(gmail_user, gmail_pass, email_to, excel_buf, csv_data, se
         msg["From"] = gmail_user
         msg["To"] = email_to
         msg["Subject"] = f"Companies House Prospector Results — {search_date}"
-
-        # Body
         body_lines = ["Your Companies House Prospector search has completed.", ""]
         for k, v in criteria.items():
             body_lines.append(f"{k}: {v}")
         body_lines.append("Please find the Excel and CSV results attached.")
         msg.attach(MIMEText("\n".join(body_lines), "plain"))
-
-        # Attach Excel
         part_xl = MIMEBase("application", "octet-stream")
         part_xl.set_payload(excel_buf)
         encoders.encode_base64(part_xl)
         part_xl.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.xlsx"')
         msg.attach(part_xl)
-
-        # Attach CSV
         part_csv = MIMEBase("application", "octet-stream")
         part_csv.set_payload(csv_data.encode("utf-8-sig"))
         encoders.encode_base64(part_csv)
         part_csv.add_header("Content-Disposition", f'attachment; filename="prospector_results_{search_date}.csv"')
         msg.attach(part_csv)
-
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(gmail_user, gmail_pass)
             server.sendmail(gmail_user, email_to, msg.as_string())
@@ -491,10 +446,8 @@ def send_email_results(gmail_user, gmail_pass, email_to, excel_buf, csv_data, se
 
 st.markdown('<div class="main-header">\U0001f3e2 Companies House Prospector</div>', unsafe_allow_html=True)
 
-# ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### \U0001f511 API Key")
-    # Load from Streamlit secrets if available
     import os
     try:
         api_key = st.secrets.get("CH_API_KEY") or os.environ.get("CH_API_KEY","")
@@ -515,7 +468,6 @@ with st.sidebar:
                                      placeholder="Paste your API key here")
             if api_key: st.session_state["api_key"] = api_key
 
-    # Email settings
     st.markdown("---")
     st.markdown("### 📧 Email Results")
     try:
@@ -547,8 +499,7 @@ with st.sidebar:
     st.markdown("### \u2605 Quality Filters")
     excl_dormant = st.checkbox("Exclude dormant", value=True)
     min_age = st.number_input("Min age (years)", value=3, min_value=0, max_value=50)
-    max_age = st.number_input("Max age (years)", value=0, min_value=0, max_value=100,
-                               help="0 = no limit")
+    max_age = st.number_input("Max age (years)", value=0, min_value=0, max_value=100, help="0 = no limit")
     min_net_assets = st.number_input("Min net assets (\u00a3)", value=0, min_value=0)
 
     st.markdown("### \U0001f4c8 Financial Data")
@@ -558,8 +509,7 @@ with st.sidebar:
     st.markdown("### \U0001f465 Employee Filter")
     col3, col4 = st.columns(2)
     with col3: emp_min = st.number_input("Min", value=0, min_value=0, key="emp_min")
-    with col4: emp_max = st.number_input("Max", value=0, min_value=0, key="emp_max",
-                                          help="0 = no limit")
+    with col4: emp_max = st.number_input("Max", value=0, min_value=0, key="emp_max", help="0 = no limit")
 
     st.markdown("### \u2699\ufe0f Output")
     one_per_company = st.checkbox("One contact per company", value=True)
@@ -587,7 +537,7 @@ if search_btn:
     elif not email_to:
         st.warning("Please enter an email address to receive results.")
     else:
-        import json, uuid
+        import uuid
         selected_sics = [sic_codes[sic_labels.index(l)] for l in selected_sic_labels]
         selected_types = []
         if type_ltd: selected_types.append("ltd")
@@ -612,44 +562,42 @@ if search_btn:
             "submitted_at": time.time(),
         }
         try:
-            with open("/tmp/ch_job.json", "w") as f:
-                json.dump(job, f)
-            # Clear old status
-            if os.path.exists("/tmp/ch_status.json"):
-                os.remove("/tmp/ch_status.json")
+            _r = get_redis()
+            _r.set("ch_job", json.dumps(job))
+            _r.delete("ch_status")
             st.success(f"✅ Search queued! You will receive results by email at **{email_to}** when complete. You can now close this browser.")
             st.info(f"Searching: **{location}** | **{len(selected_sic_labels)}** industries | **{len(selected_sics)}** SIC codes")
         except Exception as e:
             st.error(f"Failed to queue search: {e}")
 
-        # Search queued — worker.py handles execution
 # ─── Background job status ───────────────────────────────────────────────────
-import json as _json
-import os as _os
-_status_file = "/tmp/ch_status.json"
-if _os.path.exists(_status_file):
-    try:
-        with open(_status_file) as _f:
-            _status = _json.load(_f)
-        if _status.get("running"):
-            _elapsed = int(time.time() - _status.get("started_at", time.time()))
-            _elapsed_str = f"{_elapsed//60}m {_elapsed%60}s" if _elapsed >= 60 else f"{_elapsed}s"
-            _total = _status.get("total", 0)
-            _d = _status.get("dir_done", 0)
-            _fn = _status.get("fin_done", 0)
-            st.info(
-                f"🔄 **Search running in background**\n\n"
-                f"Stage: {_status.get('stage', '...')}\n\n"
-                f"Directors: {_d:,}/{_total:,} | Financials: {_fn:,}/{_total:,} | Elapsed: {_elapsed_str}\n\n"
-                f"✉️ Results will be emailed when complete. You can close this browser safely."
-            )
-            time.sleep(5)
-            st.rerun()
-        elif _status.get("error"):
-            st.error(f"⚠️ Last search failed: {_status.get('error')}")
-        elif _status.get("email_sent"):
-            st.success(f"✅ Last search complete — {_status.get('results_count',0):,} results emailed.")
-    except: pass
+_status = {}
+try:
+    _r = get_redis()
+    _raw = _r.get("ch_status")
+    if _raw:
+        _status = json.loads(_raw)
+except:
+    pass
+
+if _status.get("running"):
+    _elapsed = int(time.time() - _status.get("started_at", time.time()))
+    _elapsed_str = f"{_elapsed//60}m {_elapsed%60}s" if _elapsed >= 60 else f"{_elapsed}s"
+    _total = _status.get("total", 0)
+    _d = _status.get("dir_done", 0)
+    _fn = _status.get("fin_done", 0)
+    st.info(
+        f"🔄 **Search running in background**\n\n"
+        f"Stage: {_status.get('stage', '...')}\n\n"
+        f"Directors: {_d:,}/{_total:,} | Financials: {_fn:,}/{_total:,} | Elapsed: {_elapsed_str}\n\n"
+        f"✉️ Results will be emailed when complete. You can close this browser safely."
+    )
+    time.sleep(5)
+    st.rerun()
+elif _status.get("error"):
+    st.error(f"⚠️ Last search failed: {_status.get('error')}")
+elif _status.get("email_sent"):
+    st.success(f"✅ Last search complete — {_status.get('results_count',0):,} results emailed.")
 
 # ─── Results display ──────────────────────────────────────────────────────────
 results = st.session_state.get("results",[])
@@ -658,8 +606,6 @@ financials_cache = st.session_state.get("financials_cache",{})
 
 if results:
     st.markdown(f"### {len(results):,} results loaded")
-
-    # Build rows for display
     rows = []
     for c in results:
         num = c.get("company_number","")
@@ -691,36 +637,21 @@ if results:
             ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
             li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {company_name}")
             rows.append({
-                "Score": score_str,
-                "First Name": first_n,
-                "Surname": last_n,
-                "Company": company_name,
-                "Number": num,
-                "Address": addr_str,
+                "Score": score_str, "First Name": first_n, "Surname": last_n,
+                "Company": company_name, "Number": num, "Address": addr_str,
                 "SIC": sics,
                 "Category": ", ".join([l.split("(")[0].strip() for l in selected_sic_labels if any(s in sics for s in [sic_codes[sic_labels.index(l)]])]) or ", ".join(selected_sic_labels[:1]).split("(")[0].strip(),
-                "Incorporated": inc,
-                "Age": age,
-                "Total Assets": fin.get("total_assets",""),
-                "Net Assets": fin.get("net_assets",""),
-                "Fixed Assets": fin.get("fixed_assets",""),
-                "Current Assets": fin.get("current_assets",""),
-                "Employees": fin.get("employees",""),
-                "Accounts Date": fin.get("accounts_date",""),
-                "Dir. Appointed": appt,
-                "Accountant": fin.get("accountant",""),
-                "CH Link": ch_url,
-                "LinkedIn": li_url,
+                "Incorporated": inc, "Age": age,
+                "Total Assets": fin.get("total_assets",""), "Net Assets": fin.get("net_assets",""),
+                "Fixed Assets": fin.get("fixed_assets",""), "Current Assets": fin.get("current_assets",""),
+                "Employees": fin.get("employees",""), "Accounts Date": fin.get("accounts_date",""),
+                "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
+                "CH Link": ch_url, "LinkedIn": li_url,
             })
 
     import pandas as pd
     df = pd.DataFrame(rows)
-    # Sort by numeric score descending
-    if "_score_num" in df.columns:
-        df = df.sort_values("_score_num", ascending=False).reset_index(drop=True)
-        df = df.drop(columns=["_score_num"])
 
-    # Display table
     display_df = df.copy()
     display_df["CH company"] = display_df["CH Link"]
     display_df["Officers"] = display_df["CH Link"].apply(lambda x: x + "/officers" if x else "")
@@ -756,7 +687,6 @@ if results:
         }
     )
 
-    # Build smart filename
     def _make_filename(ext):
         loc = location.strip().replace(" ","").lower()[:10]
         cats = "_".join([
@@ -767,12 +697,10 @@ if results:
         d = date.today().strftime("%d%m%y")
         return f"{loc}_{cats}_{d}.{ext}"
 
-    # Export buttons
     st.markdown("---")
     col_a, col_b, col_c = st.columns([1,1,2])
 
     with col_a:
-        # Excel export
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font, PatternFill, Alignment
@@ -781,7 +709,6 @@ if results:
             wb = Workbook()
             ws = wb.active
             ws.title = "Prospects"
-            # Build headers
             base_cols = [c for c in df.columns if c not in ["CH Link", "LinkedIn"]]
             headers_xl = base_cols + ["CH company", "Officers", "LinkedIn"]
             hdr_fill = PatternFill("solid", fgColor="1a4a2e")
@@ -807,7 +734,6 @@ if results:
                         cell.value = labels[ci - len(base_cols) - 1]
                         cell.hyperlink = val
                         cell.font = Font(name="Arial", size=9, color="0563C1", underline="single")
-            # Auto-fit columns
             for ci, h in enumerate(headers_xl, 1):
                 col_letter = get_column_letter(ci)
                 max_len = len(str(h))
@@ -818,11 +744,8 @@ if results:
             ws.auto_filter.ref = ws.dimensions
             ws.freeze_panes = "A2"
 
-            # Accountants summary sheet
             ws_acct = wb.create_sheet("Accountants")
-            acct_counts = Counter(
-                r for r in df["Accountant"].tolist() if r and str(r).strip()
-            )
+            acct_counts = Counter(r for r in df["Accountant"].tolist() if r and str(r).strip())
             ws_acct.cell(row=1, column=1, value="Accountant Firm").font = Font(bold=True, name="Arial", size=10)
             ws_acct.cell(row=1, column=2, value="No. of Clients").font = Font(bold=True, name="Arial", size=10)
             ws_acct.cell(row=1, column=3, value="Companies").font = Font(bold=True, name="Arial", size=10)
@@ -831,7 +754,6 @@ if results:
                 cell.fill = PatternFill("solid", fgColor="1a4a2e")
                 cell.font = Font(bold=True, name="Arial", size=10, color="FFFFFF")
                 cell.alignment = Alignment(horizontal="center")
-            # For each accountant, list which companies they appear against
             acct_companies = {}
             for _, row in df.iterrows():
                 acct = str(row.get("Accountant","")).strip()
@@ -852,7 +774,6 @@ if results:
             ws_acct.column_dimensions["C"].width = 60
             ws_acct.auto_filter.ref = f"A1:C{ws_acct.max_row}"
 
-            # Criteria sheet
             ws2 = wb.create_sheet("Search Criteria")
             crit = st.session_state.get("search_criteria",{})
             for i, (k,v) in enumerate(crit.items(), 1):
@@ -875,8 +796,6 @@ if results:
             st.error(f"Excel error: {e}")
 
     with col_b:
-        # CSV export
-        csv_buf = io.StringIO()
         df_csv = df.copy()
         df_csv["CH company"] = df["CH Link"]
         df_csv["Officers"] = df["CH Link"].apply(lambda x: x + "/officers")
@@ -894,16 +813,8 @@ if results:
 else:
     st.info("Configure your filters in the sidebar and click **Search Companies House** to begin.")
 
-# ─── Error log display ────────────────────────────────────────────────────────
 if _log_buffer:
     with st.expander(f"🔍 Event log ({len(_log_buffer)} entries)", expanded=False):
         st.code(get_log_text(), language=None)
         if st.button("Clear log"):
             _log_buffer.clear()
-    st.markdown("""
-    **Tips:**
-    - Select one or more industries from the sidebar
-    - Enter a UK location (town, county or postcode area)
-    - Tick **Fetch financials** for net assets, employees and scoring
-    - Results are sorted by quality score (\u2605\u2605\u2605\u2605\u2605 = best prospects)
-    """)

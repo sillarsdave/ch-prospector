@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Background worker — runs permanently on Railway.
-Picks up search jobs from job.json, runs them, emails results.
+Picks up search jobs from Redis, runs them, emails results.
 Completely independent of the Streamlit browser session.
 """
 import json
@@ -12,13 +12,16 @@ import re
 import io
 import requests
 import traceback
+import redis
 from base64 import b64encode
 from datetime import date, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 
-JOB_FILE   = "/tmp/ch_job.json"
-STATUS_FILE = "/tmp/ch_status.json"
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+def get_redis():
+    return redis.from_url(REDIS_URL, decode_responses=True)
 
 API_BASE = "https://api.company-information.service.gov.uk"
 
@@ -192,7 +195,6 @@ def fetch_financials(company_number, api_key):
                         result["employees"] = str(v)
                         break
 
-        # Accountant extraction
         try:
             SUFFIXES = r"(?:LLP|Chartered Accountants|Certified Accountants|Chartered Certified Accountants|& Co(?:\.|mpany)?|Accountants)"
             trigger_pat = (r"(?:prepared by|statutory auditors?|reporting accountants?|"
@@ -274,9 +276,10 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
 
 def write_status(status):
     try:
-        with open(STATUS_FILE, "w") as f:
-            json.dump(status, f)
-    except: pass
+        r = get_redis()
+        r.set("ch_status", json.dumps(status))
+    except Exception as e:
+        print(f"[{datetime.now()}] Status write error: {e}")
 
 def send_results_email(gmail_user, gmail_pass, email_to, excel_buf, csv_data, search_date, criteria):
     import smtplib
@@ -330,7 +333,6 @@ def run_job(job):
                   "total": 0, "started_at": time.time(), "error": None})
 
     try:
-        # Stage 1: fetch companies
         base_params = {"location": location, "company_status": "active"}
         if company_types: base_params["company_type"] = ",".join(company_types)
 
@@ -342,7 +344,6 @@ def run_job(job):
                 if num and num not in seen:
                     seen.add(num); all_items.append(c)
 
-        # Filter age / dormant
         today = date.today()
         filtered = []
         for c in all_items:
@@ -362,7 +363,6 @@ def run_job(job):
         write_status({"running": True, "stage": f"Loading directors and financials for {total:,} companies...",
                       "dir_done": 0, "fin_done": 0, "total": total, "started_at": time.time(), "error": None})
 
-        # Stage 2/3: directors and financials
         director_cache = {}; financials_cache = {}
         dir_lock = threading.Lock(); fin_lock = threading.Lock()
         dir_done = [0]; fin_done = [0]
@@ -382,6 +382,8 @@ def run_job(job):
             num = c.get("company_number","")
             if not num: return num, {}
             return num, fetch_financials(num, api_key)
+
+        start_time = time.time()
 
         def run_dirs():
             with ThreadPoolExecutor(max_workers=6) as ex:
@@ -405,7 +407,6 @@ def run_job(job):
                     except: pass
                     with fin_lock: fin_done[0] += 1
 
-        start_time = time.time()
         t1 = threading.Thread(target=run_dirs, daemon=False)
         t2 = threading.Thread(target=run_fins, daemon=False)
         t1.start(); t2.start()
@@ -415,7 +416,6 @@ def run_job(job):
                       "dir_done": dir_done[0], "fin_done": fin_done[0],
                       "total": total, "started_at": start_time, "error": None})
 
-        # Stage 4: build rows
         def sort_key(c):
             fin = financials_cache.get(c.get("company_number",""),{})
             score = calc_score(fin)
@@ -493,7 +493,6 @@ def run_job(job):
                     "CH Link": ch_url, "LinkedIn": li_url,
                 })
 
-        # Build Excel
         import pandas as pd
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -535,7 +534,6 @@ def run_job(job):
         ws.auto_filter.ref = ws.dimensions
         ws.freeze_panes = "A2"
 
-        # Accountants sheet
         ws_acct = wb.create_sheet("Accountants")
         acct_counts = Counter(r for r in df["Accountant"].tolist() if r and str(r).strip())
         for ci, h in enumerate(["Accountant Firm","No. of Clients","Companies"], 1):
@@ -557,7 +555,6 @@ def run_job(job):
         ws_acct.column_dimensions["B"].width = 14
         ws_acct.column_dimensions["C"].width = 60
 
-        # Criteria sheet
         ws2 = wb.create_sheet("Search Criteria")
         criteria = {"Location": location, "Industries": ", ".join(sic_labels),
                     "Total results": len(rows), "Export date": today.strftime("%d %B %Y")}
@@ -567,7 +564,6 @@ def run_job(job):
 
         xl_buf = io.BytesIO(); wb.save(xl_buf); xl_buf.seek(0)
 
-        # Build CSV
         csv_df = df.copy()
         csv_df["CH company"] = df["CH Link"]
         csv_df["Officers"] = df["CH Link"].apply(lambda x: x+"/officers")
@@ -575,7 +571,6 @@ def run_job(job):
         csv_df = csv_df.drop(columns=["CH Link","LinkedIn"])
         csv_str = csv_df.to_csv(index=False)
 
-        # Send email
         search_date = today.strftime("%d %B %Y")
         send_results_email(gmail_user, gmail_pass, email_to,
                            xl_buf.getvalue(), csv_str, search_date, criteria)
@@ -588,7 +583,6 @@ def run_job(job):
     except Exception as e:
         write_status({"running": False, "stage": "Error", "error": str(e),
                       "traceback": traceback.format_exc()})
-        # Send error email
         try:
             import smtplib
             from email.mime.text import MIMEText
@@ -603,22 +597,28 @@ def run_job(job):
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"[{datetime.now()}] Worker started — watching for jobs...")
+    print(f"[{datetime.now()}] Worker started — connecting to Redis...")
+    try:
+        r = get_redis()
+        r.ping()
+        print(f"[{datetime.now()}] Redis connected OK")
+    except Exception as e:
+        print(f"[{datetime.now()}] Redis connection failed: {e}")
+
     last_job_id = None
 
     while True:
         try:
-            if os.path.exists(JOB_FILE):
-                with open(JOB_FILE) as f:
-                    job = json.load(f)
-
+            r = get_redis()
+            data = r.get("ch_job")
+            if data:
+                job = json.loads(data)
                 job_id = job.get("job_id")
                 if job_id and job_id != last_job_id:
                     last_job_id = job_id
                     print(f"[{datetime.now()}] New job: {job_id} — {job.get('location')} | {len(job.get('sic_codes',[]))} SIC codes")
                     run_job(job)
                     print(f"[{datetime.now()}] Job {job_id} complete")
-
         except Exception as e:
             print(f"[{datetime.now()}] Worker loop error: {e}")
 
