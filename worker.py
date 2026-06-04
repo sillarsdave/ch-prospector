@@ -118,7 +118,7 @@ def split_director_name(full_name):
 
 def fetch_financials(company_number, api_key):
     from bs4 import BeautifulSoup
-    result = {"accounts_date":"","total_assets":"","net_assets":"",
+    result = {"accounts_date":"","cash_at_bank":"","total_assets":"","net_assets":"",
               "fixed_assets":"","current_assets":"","employees":"","accountant":""}
     try:
         auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
@@ -183,6 +183,7 @@ def fetch_financials(company_number, api_key):
         result["net_assets"]     = fv(get_val(soup,["NetAssetsLiabilities","NetAssets","ShareholdersEquity","Equity"]))
         result["fixed_assets"]   = fv(get_val(soup,["FixedAssets","TotalFixedAssets","NonCurrentAssets"]))
         result["current_assets"] = fv(get_val(soup,["CurrentAssets","TotalCurrentAssets"]))
+        result["cash_at_bank"]    = fv(get_val(soup,["CashBankInHand","CashBankOnHand","Cash","CashAndCashEquivalents","CashAtBankAndInHand"]))
         result["employees"]      = ev(get_val(soup,["AverageNumberEmployeesDuringPeriod","NumberEmployees","AverageNumberPersonsEmployed"]))
 
         if not result["employees"]:
@@ -502,12 +503,13 @@ def run_job(job):
 
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
-                    "Company": company_name, "Number": num, "Address": addr_str,
-                    "SIC": sics, "Category": category, "Incorporated": inc, "Age": age,
-                    "Total Assets": _parse_numeric(fin.get("total_assets","")),
-                    "Net Assets": _parse_numeric(fin.get("net_assets","")),
+                    "Company": company_name, "Address": addr_str,
+                    "Category": category, "Incorporated": inc, "Age": age,
                     "Fixed Assets": _parse_numeric(fin.get("fixed_assets","")),
                     "Current Assets": _parse_numeric(fin.get("current_assets","")),
+                    "Total Assets": _parse_numeric(fin.get("total_assets","")),
+                    "Net Assets": _parse_numeric(fin.get("net_assets","")),
+                    "Cash at Bank": _parse_numeric(fin.get("cash_at_bank","")),
                     "Employees": _parse_emp(fin.get("employees","")),
                     "Accounts Date": fin.get("accounts_date",""),
                     "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
@@ -528,7 +530,7 @@ def run_job(job):
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
         base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"]]
         headers_xl = base_cols + ["CH company","Officers","LinkedIn"]
-        CURRENCY_COLS = {"Total Assets","Net Assets","Fixed Assets","Current Assets"}
+        CURRENCY_COLS = {"Total Assets","Net Assets","Fixed Assets","Current Assets","Cash at Bank"}
         NUMBER_COLS = {"Employees","Age"}
         hdr_fill = PatternFill("solid", fgColor="1a4a2e")
         for i, h in enumerate(headers_xl, 1):
