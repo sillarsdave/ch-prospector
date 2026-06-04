@@ -119,7 +119,8 @@ def split_director_name(full_name):
 def fetch_financials(company_number, api_key):
     from bs4 import BeautifulSoup
     result = {"accounts_date":"","cash_at_bank":"","total_assets":"","net_assets":"",
-              "fixed_assets":"","current_assets":"","employees":"","accountant":""}
+              "fixed_assets":"","current_assets":"","employees":"","accountant":"",
+              "is_dormant": False}
     try:
         auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
         headers = {"Authorization": auth}
@@ -133,7 +134,12 @@ def fetch_financials(company_number, api_key):
                              params={"category":"accounts","items_per_page":10},
                              headers=headers, timeout=12)
         if fh.status_code != 200: return result
-        filings = [f for f in fh.json().get("items",[])
+        all_filings = fh.json().get("items",[])
+        # If ALL filings are dormant, mark as dormant
+        if all_filings and all("dormant" in f.get("description","").lower() for f in all_filings):
+            result["is_dormant"] = True
+            return result
+        filings = [f for f in all_filings
                    if "dormant" not in f.get("description","").lower()]
         if not filings: return result
         latest = filings[0]
@@ -149,7 +155,16 @@ def fetch_financials(company_number, api_key):
         if "application/xhtml+xml" not in meta.get("resources",{}): return result
         doc_r = requests.get(doc_url, headers={**headers,"Accept":"application/xhtml+xml"}, timeout=25)
         if doc_r.status_code != 200: return result
+        # Check for dormant in the actual document content or URL
+        if "dormant" in doc_url.lower() or "dormant" in doc_r.text[:2000].lower():
+            result["is_dormant"] = True
+            return result
         soup = BeautifulSoup(doc_r.content, "html.parser")
+        # Final check in parsed text (catches "accounts for a dormant company" headings)
+        doc_text_sample = soup.get_text()[:3000].lower()
+        if "dormant" in doc_text_sample:
+            result["is_dormant"] = True
+            return result
 
         def get_val(soup, tag_names):
             for tag_name in tag_names:
@@ -236,7 +251,8 @@ def fetch_financials(company_number, api_key):
                     skip = ["the company","the directors","companies house","hmrc",
                             "limited company","association of","institute of",
                             "liability partnership","recruitment","staffing",
-                            "employment","personnel","limited liability"]
+                            "employment","personnel","limited liability",
+                            "limitedliabilitypartnership","limited liability partnership llp"]
                     if any(s in candidate.lower() for s in skip): continue
                     if len(candidate) > 4:
                         accountant = candidate
@@ -447,6 +463,7 @@ def run_job(job):
             num = c.get("company_number","")
             fin = financials_cache.get(num,{})
             if excl_dormant and "dormant" in c.get("company_status","").lower(): continue
+            if excl_dormant and fin.get("is_dormant", False): continue
             if min_net_assets > 0:
                 try:
                     _na = fin.get("net_assets", None)
@@ -522,7 +539,8 @@ def run_job(job):
 
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
-                    "Company": company_name, "Address": addr_str,
+                    "Company": company_name, "Type": {"ltd": "LTD", "llp": "LLP", "plc": "PLC", "private-limited-guarant-nsc": "LTD", "private-unlimited": "LTD"}.get(c.get("company_type","").lower(), c.get("company_type","").upper()),
+                    "Address": addr_str,
                     "Category": category, "Incorporated": inc, "Age": age,
                     "Fixed Assets": _parse_numeric(fin.get("fixed_assets","")),
                     "Current Assets": _parse_numeric(fin.get("current_assets","")),
