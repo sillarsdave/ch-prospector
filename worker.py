@@ -174,17 +174,36 @@ def fetch_financials(company_number, api_key):
         def ev(v):
             if v is None: return ""
             try:
-                i = int(float(v))
+                i = int(round(float(v)))
                 if i <= 0 or i > 5000 or (1980 <= i <= 2040): return ""
                 return str(i)
             except: return ""
+
+        # Employee special extraction — use raw integer ignoring scale
+        def get_val_raw_int(soup, tag_names):
+            """Like get_val but ignores scale — for employee counts."""
+            for tag_name in tag_names:
+                for tag in soup.find_all(attrs={"name":True}):
+                    name_attr = tag.get("name","")
+                    bare = name_attr.split(":")[-1] if ":" in name_attr else name_attr
+                    if bare.lower() != tag_name.lower(): continue
+                    ctx = tag.get("contextref","")
+                    if any(x in ctx.lower() for x in ["prior","previous","preceding"]): continue
+                    try:
+                        raw = tag.get_text(strip=True).replace(",","").replace(" ","").replace(" ","")
+                        if not raw or raw in ("-","—"): continue
+                        val = int(float(raw))  # ignore scale completely
+                        if val > 0: return val
+                    except: continue
+            return None
 
         result["total_assets"]   = fv(get_val(soup,["TotalAssetsLessCurrentLiabilities","TotalAssets","BalanceSheetTotal","Assets"]))
         result["net_assets"]     = fv(get_val(soup,["NetAssetsLiabilities","NetAssets","ShareholdersEquity","Equity"]))
         result["fixed_assets"]   = fv(get_val(soup,["FixedAssets","TotalFixedAssets","NonCurrentAssets"]))
         result["current_assets"] = fv(get_val(soup,["CurrentAssets","TotalCurrentAssets"]))
         result["cash_at_bank"]    = fv(get_val(soup,["CashBankInHand","CashBankOnHand","Cash","CashAndCashEquivalents","CashAtBankAndInHand"]))
-        result["employees"]      = ev(get_val(soup,["AverageNumberEmployeesDuringPeriod","NumberEmployees","AverageNumberPersonsEmployed"]))
+        emp_raw = get_val_raw_int(soup,["AverageNumberEmployeesDuringPeriod","NumberEmployees","AverageNumberPersonsEmployed","EmployeesTotal","NumberOfEmployees","AverageNumberOfEmployees","EmployeeCount","Staff","NumberStaff","AverageNumberStaff"])
+        result["employees"] = str(emp_raw) if emp_raw and 0 < emp_raw < 5000 and not (1980 <= emp_raw <= 2040) else ""
 
         if not result["employees"]:
             text = soup.get_text().lower()
