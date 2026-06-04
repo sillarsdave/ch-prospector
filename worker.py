@@ -235,9 +235,11 @@ def fetch_financials(company_number, api_key):
 def calc_score(fin):
     score = 0
     def parse_val(s):
-        if not s: return None
+        if s is None or s == "": return None
+        # Handle both numeric (new) and string (legacy) formats
+        if isinstance(s, (int, float)): return float(s)
         try:
-            s = s.replace("£","").replace(",","").strip()
+            s = str(s).replace("£","").replace(",","").strip()
             neg = s.startswith("-"); s = s.lstrip("-")
             mult = 1_000_000 if s.endswith("m") else (1_000 if s.endswith("k") else 1)
             return float(s.rstrip("mk")) * mult * (-1 if neg else 1)
@@ -414,11 +416,9 @@ def run_job(job):
         def sort_key(c):
             fin = financials_cache.get(c.get("company_number",""),{})
             score = calc_score(fin)
-            try:
-                na_s = fin.get("net_assets","").replace("£","").replace(",","").strip()
-                neg = na_s.startswith("-"); na_s = na_s.lstrip("-")
-                mult = 1_000_000 if na_s.endswith("m") else (1_000 if na_s.endswith("k") else 1)
-                na = float(na_s.rstrip("mk")) * mult * (-1 if neg else 1)
+            na = fin.get("net_assets", None)
+            if na is None: na = -999999
+            try: na = float(na)
             except: na = -999999
             return (score, na)
 
@@ -427,13 +427,12 @@ def run_job(job):
             num = c.get("company_number","")
             fin = financials_cache.get(num,{})
             if excl_dormant and "dormant" in c.get("company_status","").lower(): continue
-            if min_net_assets > 0 and fin.get("net_assets",""):
+            if min_net_assets > 0:
                 try:
-                    s = fin["net_assets"].replace("£","").replace(",","").strip()
-                    neg = s.startswith("-"); s = s.lstrip("-")
-                    mult = 1_000_000 if s.endswith("m") else (1_000 if s.endswith("k") else 1)
-                    val = float(s.rstrip("mk")) * mult * (-1 if neg else 1)
-                    if val < min_net_assets: continue
+                    _na = fin.get("net_assets", None)
+                    if _na is not None:
+                        val = float(_na)
+                        if val < min_net_assets: continue
                 except: pass
             emp_s = fin.get("employees","")
             if (emp_min > 0 or emp_max > 0) and emp_s:
@@ -477,13 +476,40 @@ def run_job(job):
                 first_n, last_n = split_director_name(name)
                 ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
                 li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {linkedin_company_keyword(company_name)}")
+                def _parse_numeric(s):
+                    """Convert £1.0m / £500k to float for sorting."""
+                    if not s: return -999999999
+                    try:
+                        s = str(s).replace("£","").replace(",","").strip()
+                        neg = s.startswith("-"); s = s.lstrip("-")
+                        mult = 1_000_000 if s.endswith("m") else (1_000 if s.endswith("k") else 1)
+                        return float(s.rstrip("mk")) * mult * (-1 if neg else 1)
+                    except: return -999999999
+
+                def _parse_numeric(s):
+                    """Convert £1.0m / £500k to float for sorting."""
+                    if not s: return None
+                    try:
+                        s = str(s).replace("£","").replace(",","").strip()
+                        neg = s.startswith("-"); s = s.lstrip("-")
+                        mult = 1_000_000 if s.endswith("m") else (1_000 if s.endswith("k") else 1)
+                        return float(s.rstrip("mk")) * mult * (-1 if neg else 1)
+                    except: return None
+
+                def _parse_emp(s):
+                    try: return int(str(s).strip()) if s else None
+                    except: return None
+
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
                     "Company": company_name, "Number": num, "Address": addr_str,
                     "SIC": sics, "Category": category, "Incorporated": inc, "Age": age,
-                    "Total Assets": fin.get("total_assets",""), "Net Assets": fin.get("net_assets",""),
-                    "Fixed Assets": fin.get("fixed_assets",""), "Current Assets": fin.get("current_assets",""),
-                    "Employees": fin.get("employees",""), "Accounts Date": fin.get("accounts_date",""),
+                    "Total Assets": _parse_numeric(fin.get("total_assets","")),
+                    "Net Assets": _parse_numeric(fin.get("net_assets","")),
+                    "Fixed Assets": _parse_numeric(fin.get("fixed_assets","")),
+                    "Current Assets": _parse_numeric(fin.get("current_assets","")),
+                    "Employees": _parse_emp(fin.get("employees","")),
+                    "Accounts Date": fin.get("accounts_date",""),
                     "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
                     "CH Link": ch_url, "LinkedIn": li_url,
                 })
@@ -497,9 +523,13 @@ def run_job(job):
         import base64
 
         df = pd.DataFrame(rows)
+        # Sort by net assets descending (numeric now so sorts correctly)
+        df = df.sort_values("Net Assets", ascending=False, na_position="last").reset_index(drop=True)
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
         base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"]]
         headers_xl = base_cols + ["CH company","Officers","LinkedIn"]
+        CURRENCY_COLS = {"Total Assets","Net Assets","Fixed Assets","Current Assets"}
+        NUMBER_COLS = {"Employees","Age"}
         hdr_fill = PatternFill("solid", fgColor="1a4a2e")
         for i, h in enumerate(headers_xl, 1):
             cell = ws.cell(row=1, column=i, value=h)
@@ -513,9 +543,16 @@ def run_job(job):
             fill = fill_even if rn % 2 == 0 else fill_odd
             row_vals = [row[c] for c in base_cols] + [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
             for ci, val in enumerate(row_vals, 1):
+                h = headers_xl[ci-1] if ci <= len(headers_xl) else ""
                 cell = ws.cell(row=rn, column=ci, value=val)
                 cell.fill = fill; cell.font = Font(name="Arial", size=9)
                 cell.alignment = Alignment(horizontal="left", vertical="center")
+                if h in CURRENCY_COLS and val is not None:
+                    cell.number_format = '£#,##0;-£#,##0'
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                elif h in NUMBER_COLS and val is not None:
+                    cell.number_format = '#,##0'
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
                 if ci > len(base_cols):
                     labels = ["Open","Officers","LinkedIn"]
                     cell.value = labels[ci-len(base_cols)-1]
