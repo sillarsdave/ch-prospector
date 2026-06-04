@@ -110,6 +110,18 @@ SIC_OPTIONS = [
     ("Veterinary (75000)", "75000"),
     ("Video production (59112)", "59112"),
     ("Vocational training (85320)", "85320"),
+    ("Management consultancy (70210)", "70210"),
+    ("Business support services (82190)", "82190"),
+    ("Translation / interpretation (74300)", "74300"),
+    ("Electrical installation (43210)", "43210"),
+    ("Plumbing / heating (43220)", "43220"),
+    ("Carpentry / joinery (43320)", "43320"),
+    ("Painting / decorating (43341)", "43341"),
+    ("Landscaping (81300)", "81300"),
+    ("Specialist construction (43990)", "43990"),
+    ("Osteopathy / chiropractic (86901)", "86901"),
+    ("Graphic design (74101)", "74101"),
+    ("IT support / infrastructure (62090)", "62090"),
 ]
 
 class RateLimiter:
