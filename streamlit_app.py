@@ -712,6 +712,11 @@ if results:
 
     import pandas as pd
     df = pd.DataFrame(rows)
+    # Sort by score (desc) then net assets (desc)
+    SCORE_ORDER = {"★★★★★": 5, "★★★★": 4, "★★★": 3, "★★": 2, "★": 1, "☆": 0}
+    df["_score_num"] = df["Score"].map(SCORE_ORDER).fillna(0)
+    df = df.sort_values(["_score_num", "Net Assets"], ascending=[False, False], na_position="last")
+    df = df.drop(columns=["_score_num"]).reset_index(drop=True)
     display_df = df.copy()
     display_df["CH company"] = display_df["CH Link"]
     display_df["Officers"] = display_df["CH Link"].apply(lambda x: x + "/officers" if x else "")
