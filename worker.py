@@ -21,7 +21,13 @@ from collections import deque
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 def get_redis():
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=10,
+        health_check_interval=30,
+    )
 
 def is_cancelled(job_id):
     """Check if a cancel has been requested for this job."""
@@ -67,11 +73,12 @@ _rl = RateLimiter()
 def ch_get(path, api_key):
     _rl.wait_if_needed()
     auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
-    r = requests.get(API_BASE + path, headers={"Authorization": auth}, timeout=20)
+    # Tuple timeout: (connect_timeout, read_timeout)
+    r = requests.get(API_BASE + path, headers={"Authorization": auth}, timeout=(5, 15))
     if r.status_code == 429:
         time.sleep(5)
         _rl.wait_if_needed()
-        r = requests.get(API_BASE + path, headers={"Authorization": auth}, timeout=20)
+        r = requests.get(API_BASE + path, headers={"Authorization": auth}, timeout=(5, 15))
     r.raise_for_status()
     return r.json()
 
@@ -127,12 +134,12 @@ def fetch_financials(company_number, api_key):
         _rl.wait_if_needed()
         fh = requests.get(f"{API_BASE}/company/{company_number}/filing-history",
                          params={"category":"accounts","items_per_page":10},
-                         headers=headers, timeout=12)
+                         headers=headers, timeout=(5, 8))
         if fh.status_code == 429:
             time.sleep(3); _rl.wait_if_needed()
             fh = requests.get(f"{API_BASE}/company/{company_number}/filing-history",
                              params={"category":"accounts","items_per_page":10},
-                             headers=headers, timeout=12)
+                             headers=headers, timeout=(5, 8))
         if fh.status_code != 200: return result
         all_filings = fh.json().get("items",[])
         # If ALL filings are dormant, mark as dormant
@@ -147,19 +154,49 @@ def fetch_financials(company_number, api_key):
         doc_meta_url = latest.get("links",{}).get("document_metadata","")
         if not doc_meta_url: return result
         _rl.wait_if_needed()
-        dm = requests.get(doc_meta_url, headers=headers, timeout=12)
+        dm = requests.get(doc_meta_url, headers=headers, timeout=(5, 8))
         if dm.status_code != 200: return result
         meta = dm.json()
         doc_url = meta.get("links",{}).get("document","")
         if not doc_url: return result
         if "application/xhtml+xml" not in meta.get("resources",{}): return result
-        doc_r = requests.get(doc_url, headers={**headers,"Accept":"application/xhtml+xml"}, timeout=25)
-        if doc_r.status_code != 200: return result
+        # iXBRL doc fetch with HARD total time + size limits (prevents indefinite hangs)
+        _fetch_start = time.time()
+        _max_fetch_seconds = 25
+        _max_fetch_bytes = 15 * 1024 * 1024  # 15MB
+        try:
+            doc_r = requests.get(doc_url,
+                                 headers={**headers, "Accept": "application/xhtml+xml"},
+                                 timeout=(5, 15), stream=True)
+        except requests.exceptions.RequestException:
+            return result
+        if doc_r.status_code != 200:
+            doc_r.close()
+            return result
+        _chunks = []
+        _total_bytes = 0
+        try:
+            for _chunk in doc_r.iter_content(chunk_size=65536):
+                if time.time() - _fetch_start > _max_fetch_seconds:
+                    doc_r.close()
+                    return result
+                if _chunk:
+                    _total_bytes += len(_chunk)
+                    if _total_bytes > _max_fetch_bytes:
+                        doc_r.close()
+                        return result
+                    _chunks.append(_chunk)
+        except requests.exceptions.RequestException:
+            doc_r.close()
+            return result
+        doc_r.close()
+        _doc_content = b"".join(_chunks)
+        _doc_text_preview = _doc_content[:2000].decode("utf-8", errors="ignore")
         # Check for dormant in the actual document content or URL
-        if "dormant" in doc_url.lower() or "dormant" in doc_r.text[:2000].lower():
+        if "dormant" in doc_url.lower() or "dormant" in _doc_text_preview.lower():
             result["is_dormant"] = True
             return result
-        soup = BeautifulSoup(doc_r.content, "html.parser")
+        soup = BeautifulSoup(_doc_content, "html.parser")
         # Final check in parsed text (catches "accounts for a dormant company" headings)
         doc_text_sample = soup.get_text()[:3000].lower()
         if "dormant" in doc_text_sample:
@@ -305,7 +342,7 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
         params = {**params_base, "size": 100, "start_index": start}
         _rl.wait_if_needed()
         r = requests.get(API_BASE + "/advanced-search/companies",
-                        params=params, headers=headers, timeout=15)
+                        params=params, headers=headers, timeout=(5, 10))
         if r.status_code not in (200,): break
         data = r.json()
         batch = data.get("items", data.get("companies",[]))
@@ -352,13 +389,46 @@ def run_job(job):
         base_params = {"location": location, "company_status": "active"}
         if company_types: base_params["company_type"] = ",".join(company_types)
 
+        start_time = time.time()
         all_items = []; seen = set()
-        for sic in selected_sics:
-            fetched = fetch_all_for_sic(sic, base_params, api_key)
-            for c in fetched:
-                num = c.get("company_number","")
-                if num and num not in seen:
-                    seen.add(num); all_items.append(c)
+        if selected_sics:
+            # Parallelise SIC code fetches — typically the slowest sequential bit
+            # Use 4 workers (rate limiter handles CH API throttling globally)
+            write_status({"running": True, "stage": f"Searching {len(selected_sics)} SIC codes in parallel...",
+                          "dir_done": 0, "fin_done": 0, "total": 0,
+                          "started_at": start_time, "job_id": job.get("job_id",""),
+                          "error": None, "ready_to_email": False})
+            sic_completed = [0]
+            sic_lock = threading.Lock()
+            ex_sic = ThreadPoolExecutor(max_workers=4)
+            try:
+                futures_sic = {ex_sic.submit(fetch_all_for_sic, sic, base_params, api_key): sic
+                               for sic in selected_sics}
+                for future in as_completed(futures_sic):
+                    if is_cancelled(job.get("job_id","")):
+                        print(f"[{datetime.now()}] Job cancelled during SIC search")
+                        break
+                    try:
+                        # Generous per-SIC timeout — a single SIC can have up to 5000 results
+                        # across ~50 paginated requests, each up to 15s = ~12.5min worst case
+                        fetched = future.result(timeout=900)
+                    except Exception:
+                        fetched = []
+                    for c in fetched:
+                        num = c.get("company_number","")
+                        if num and num not in seen:
+                            seen.add(num); all_items.append(c)
+                    with sic_lock: sic_completed[0] += 1
+                    if sic_completed[0] % 5 == 0 or sic_completed[0] == len(selected_sics):
+                        write_status({"running": True,
+                                      "stage": f"Searching SIC codes ({sic_completed[0]}/{len(selected_sics)} done)...",
+                                      "dir_done": 0, "fin_done": 0, "total": 0,
+                                      "started_at": start_time, "job_id": job.get("job_id",""),
+                                      "error": None, "ready_to_email": False})
+            finally:
+                try: ex_sic.shutdown(wait=False, cancel_futures=True)
+                except Exception: pass
+        # Note: empty selected_sics means no companies found — matches original behaviour
 
         today = date.today()
         filtered = []
@@ -402,41 +472,68 @@ def run_job(job):
             return num, fetch_financials(num, api_key)
 
         def run_dirs():
-            with ThreadPoolExecutor(max_workers=6) as ex:
-                futures = {ex.submit(fetch_dir,c):c for c in all_items}
+            phase_start = time.time()
+            MAX_PHASE_SECONDS = 86400  # 24-hour safety net
+            ex = ThreadPoolExecutor(max_workers=6)
+            try:
+                futures = {ex.submit(fetch_dir, c): c for c in all_items}
                 for future in as_completed(futures):
-                    if is_cancelled(job.get("job_id","")):
+                    if is_cancelled(job.get("job_id", "")):
                         print(f"[{datetime.now()}] Job cancelled during directors fetch")
                         return
+                    if time.time() - phase_start > MAX_PHASE_SECONDS:
+                        print(f"[{datetime.now()}] Directors phase 24-hour safety timeout reached — moving on")
+                        break
                     try:
                         num, active = future.result()
                         with dir_lock: director_cache[num] = active
-                    except: pass
+                    except Exception:
+                        pass
                     with dir_lock: dir_done[0] += 1
                     write_status({"running": True, "stage": "Loading directors and financials...",
                                   "dir_done": dir_done[0], "fin_done": fin_done[0],
                                   "total": total, "started_at": start_time,
-                                  "job_id": job.get("job_id",""),
+                                  "job_id": job.get("job_id", ""),
                                   "error": None, "ready_to_email": False})
+            finally:
+                try: ex.shutdown(wait=False, cancel_futures=True)
+                except Exception: pass
 
         def run_fins():
             if not fetch_fin_flag: return
-            with ThreadPoolExecutor(max_workers=3) as ex:
-                futures = {ex.submit(fetch_fin,c):c for c in all_items}
+            phase_start = time.time()
+            MAX_PHASE_SECONDS = 86400  # 24-hour safety net
+            ex = ThreadPoolExecutor(max_workers=3)
+            try:
+                futures = {ex.submit(fetch_fin, c): c for c in all_items}
                 for future in as_completed(futures):
-                    if is_cancelled(job.get("job_id","")):
+                    if is_cancelled(job.get("job_id", "")):
                         print(f"[{datetime.now()}] Job cancelled during financials fetch")
                         return
+                    if time.time() - phase_start > MAX_PHASE_SECONDS:
+                        print(f"[{datetime.now()}] Financials phase 24-hour safety timeout reached — moving on")
+                        break
                     try:
                         num, fin = future.result()
                         with fin_lock: financials_cache[num] = fin
-                    except: pass
+                    except Exception:
+                        pass
                     with fin_lock: fin_done[0] += 1
+            finally:
+                try: ex.shutdown(wait=False, cancel_futures=True)
+                except Exception: pass
 
-        t1 = threading.Thread(target=run_dirs, daemon=False)
-        t2 = threading.Thread(target=run_fins, daemon=False)
+        t1 = threading.Thread(target=run_dirs, daemon=True)
+        t2 = threading.Thread(target=run_fins, daemon=True)
         t1.start(); t2.start()
-        t1.join(); t2.join()
+        # 48 hours total wall-clock max — generous safety net for very large searches
+        # (per-company timeouts still apply to catch individual stalls)
+        _job_deadline = time.time() + 172800
+        for _t in (t1, t2):
+            _remaining = max(1, _job_deadline - time.time())
+            _t.join(timeout=_remaining)
+        if t1.is_alive() or t2.is_alive():
+            print(f"[{datetime.now()}] WARNING: threads still running after 48-hour deadline — proceeding with partial results")
 
         if is_cancelled(job.get("job_id","")):
             print(f"[{datetime.now()}] Job cancelled — skipping results and email")
@@ -676,7 +773,6 @@ def run_job(job):
 
         # Save results to Redis FIRST (download fallback, 7-day expiry)
         search_date = today.strftime("%d %B %Y")
-        loc_str = location.strip().replace(" ","_").lower()[:15]
         try:
             _r = get_redis()
             _r.set("ch_results_excel", base64.b64encode(xl_buf.getvalue()).decode(), ex=604800)
@@ -759,15 +855,29 @@ def run_job(job):
             msg = Mail(from_email=from_email, to_emails=to_email,
                        subject=subject, plain_text_content=body_text)
             msg.attachment = Attachment(FileContent(base64.b64encode(xl_bytes).decode()),
-                FileName(f"prospector_results_{loc_str}_{date_str}{suffix}.xlsx"),
+                FileName(f"prospector_results_{date_str}{suffix}.xlsx"),
                 FileType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 Disposition("attachment"))
             if csv_bytes:
                 msg.attachment = Attachment(FileContent(base64.b64encode(csv_bytes).decode()),
-                    FileName(f"prospector_results_{loc_str}_{date_str}{suffix}.csv"),
+                    FileName(f"prospector_results_{date_str}{suffix}.csv"),
                     FileType("text/csv"), Disposition("attachment"))
             sg_client = sg_module.SendGridAPIClient(api_key=sg_key)
-            resp = sg_client.send(msg)
+            # Wrap send in a thread to prevent hangs (SendGrid lib has no built-in timeout)
+            _send_result = {"resp": None, "err": None}
+            def _do_send():
+                try: _send_result["resp"] = sg_client.send(msg)
+                except Exception as _e: _send_result["err"] = _e
+            _send_thread = threading.Thread(target=_do_send, daemon=True)
+            _send_thread.start()
+            _send_thread.join(timeout=900)  # 15-minute cap on email send
+            if _send_thread.is_alive():
+                print(f"[{datetime.now()}] WARNING: SendGrid send timed out after 15 minutes")
+                return False
+            if _send_result["err"]:
+                print(f"[{datetime.now()}] SendGrid error: {_send_result['err']}")
+                return False
+            resp = _send_result["resp"]
             return resp.status_code in (200, 202)
 
         try:
