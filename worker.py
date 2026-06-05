@@ -676,6 +676,7 @@ def run_job(job):
 
         # Save results to Redis FIRST (download fallback, 7-day expiry)
         search_date = today.strftime("%d %B %Y")
+        loc_str = location.strip().replace(" ","_").lower()[:15]
         try:
             _r = get_redis()
             _r.set("ch_results_excel", base64.b64encode(xl_buf.getvalue()).decode(), ex=604800)
@@ -758,12 +759,12 @@ def run_job(job):
             msg = Mail(from_email=from_email, to_emails=to_email,
                        subject=subject, plain_text_content=body_text)
             msg.attachment = Attachment(FileContent(base64.b64encode(xl_bytes).decode()),
-                FileName(f"prospector_results_{date_str}{suffix}.xlsx"),
+                FileName(f"prospector_results_{loc_str}_{date_str}{suffix}.xlsx"),
                 FileType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 Disposition("attachment"))
             if csv_bytes:
                 msg.attachment = Attachment(FileContent(base64.b64encode(csv_bytes).decode()),
-                    FileName(f"prospector_results_{date_str}{suffix}.csv"),
+                    FileName(f"prospector_results_{loc_str}_{date_str}{suffix}.csv"),
                     FileType("text/csv"), Disposition("attachment"))
             sg_client = sg_module.SendGridAPIClient(api_key=sg_key)
             resp = sg_client.send(msg)
