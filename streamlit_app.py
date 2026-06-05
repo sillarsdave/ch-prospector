@@ -784,6 +784,61 @@ if results:
                 ws.column_dimensions[col_letter].width = min(max(max_len+2,8),40)
             ws.auto_filter.ref = ws.dimensions
             ws.freeze_panes = "A2"
+
+            # Accountants sheet
+            from collections import Counter
+            ws_acct = wb.create_sheet("Accountants")
+            acct_counts = Counter(r for r in df["Accountant"].tolist()
+                                  if r and str(r).strip()
+                                  and "audit" not in str(r).lower()
+                                  and str(r).strip().lower() not in {"n/a", "none", "not applicable"}
+                                  and len(str(r).strip()) > 3)
+            for ci, h in enumerate(["Accountant Firm", "No. of Clients", "Companies"], 1):
+                cell = ws_acct.cell(row=1, column=ci, value=h)
+                cell.fill = PatternFill("solid", fgColor="1a4a2e")
+                cell.font = Font(bold=True, name="Arial", size=10, color="FFFFFF")
+            acct_companies = {}
+            for _, row in df.iterrows():
+                acct = str(row.get("Accountant", "")).strip()
+                if acct:
+                    acct_companies.setdefault(acct, [])
+                    co = str(row.get("Company", "")).strip()
+                    if co and co not in acct_companies[acct]:
+                        acct_companies[acct].append(co)
+            for rn, (acct, count) in enumerate(acct_counts.most_common(), 2):
+                ws_acct.cell(row=rn, column=1, value=acct).font = Font(name="Arial", size=9)
+                ws_acct.cell(row=rn, column=2, value=count).font = Font(name="Arial", size=9)
+                ws_acct.cell(row=rn, column=3, value=", ".join(acct_companies.get(acct, []))).font = Font(name="Arial", size=9)
+            ws_acct.column_dimensions["A"].width = 40
+            ws_acct.column_dimensions["B"].width = 14
+            ws_acct.column_dimensions["C"].width = 60
+
+            # Search Criteria sheet
+            ws_crit = wb.create_sheet("Search Criteria")
+            _co_types = []
+            if type_ltd: _co_types.append("LTD")
+            if type_llp: _co_types.append("LLP")
+            if type_plc: _co_types.append("PLC")
+            _age_str = f"{int(min_age)}yr+" if min_age and not max_age else (f"{int(min_age)}-{int(max_age)}yrs" if min_age and max_age else "Any")
+            _emp_str = f"{int(emp_min)}-{int(emp_max)}" if (emp_min or emp_max) else "Any"
+            criteria_data = {
+                "Location": location,
+                "Industries": ", ".join(selected_sic_labels),
+                "Company types": ", ".join(_co_types) if _co_types else "All",
+                "Min age": _age_str,
+                "Exclude dormant": "Yes" if excl_dormant else "No",
+                "Min net assets": f"£{int(min_net_assets):,}" if min_net_assets else "None",
+                "Employees": _emp_str,
+                "Fetch financials": "Yes" if fetch_financials_flag else "No",
+                "One contact per company": "Yes" if one_per_company else "No",
+                "Results in export": f"{len(rows):,}",
+                "Export date": date.today().strftime("%d %B %Y"),
+            }
+            for i, (k, v) in enumerate(criteria_data.items(), 1):
+                ws_crit.cell(row=i, column=1, value=k).font = Font(bold=True, name="Arial")
+                ws_crit.cell(row=i, column=2, value=str(v)).font = Font(name="Arial")
+            ws_crit.column_dimensions["A"].width = 28
+            ws_crit.column_dimensions["B"].width = 50
             buf = io.BytesIO(); wb.save(buf); buf.seek(0)
             st.download_button("\u2b07 Download Excel", data=buf.getvalue(),
                                file_name=_make_filename("xlsx"),
