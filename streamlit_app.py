@@ -473,6 +473,8 @@ with st.sidebar:
 
     st.markdown("### \u2699\ufe0f Output")
     one_per_company = st.checkbox("One contact per company", value=True)
+    linkedin_hyperlinks = st.checkbox("Clickable LinkedIn links", value=True,
+                                      help="Uncheck for very large searches (London etc.) to avoid Excel's 65,530 hyperlink limit")
 
     st.markdown("---")
     search_btn = st.button("\U0001f50d Search Companies House", use_container_width=True)
@@ -513,6 +515,7 @@ if search_btn:
             "emp_min": int(emp_min),
             "emp_max": int(emp_max),
             "one_per_company": one_per_company,
+            "linkedin_hyperlinks": linkedin_hyperlinks,
             "email_to": email_to,
             "submitted_at": time.time(),
         }

@@ -337,6 +337,7 @@ def run_job(job):
     emp_min        = job.get("emp_min", 0)
     emp_max        = job.get("emp_max", 0)
     one_per_co     = job.get("one_per_company", True)
+    linkedin_hyperlinks = job.get("linkedin_hyperlinks", True)
     company_types  = job.get("company_types", ["ltd","llp"])
 
     # Clear any cancel flag from previous job
@@ -593,10 +594,18 @@ def run_job(job):
                     cell.number_format = '#,##0'
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 if ci > len(base_cols):
-                    labels = ["Open","Officers","LinkedIn"]
-                    cell.value = labels[ci-len(base_cols)-1]
-                    cell.hyperlink = val
-                    cell.font = Font(name="Arial", size=9, color="0563C1", underline="single")
+                    link_index = ci - len(base_cols) - 1
+                    labels = ["Open", "Officers", "LinkedIn"]
+                    urls = [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
+                    if link_index == 2 and linkedin_hyperlinks:
+                        # LinkedIn as clickable hyperlink
+                        cell.value = labels[link_index]
+                        cell.hyperlink = urls[link_index]
+                        cell.font = Font(name="Arial", size=9, color="0563C1", underline="single")
+                    else:
+                        # CH company, Officers, and optionally LinkedIn — plain URL
+                        cell.value = urls[link_index]
+                        cell.font = Font(name="Arial", size=9)
         for ci, h in enumerate(headers_xl, 1):
             col_letter = get_column_letter(ci)
             max_len = len(str(h))
@@ -717,10 +726,16 @@ def run_job(job):
                     cell.fill = fill; cell.font = F2(name="Arial", size=9)
                     cell.alignment = AL2(horizontal="left", vertical="center")
                     if ci > len(base_cols2):
-                        lbls = ["Open","Officers","LinkedIn"]
-                        cell.value = lbls[ci-len(base_cols2)-1]
-                        cell.hyperlink = val
-                        cell.font = F2(name="Arial", size=9, color="0563C1", underline="single")
+                        link_index = ci - len(base_cols2) - 1
+                        lbls = ["Open", "Officers", "LinkedIn"]
+                        urls2 = [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
+                        if link_index == 2 and linkedin_hyperlinks:
+                            cell.value = lbls[link_index]
+                            cell.hyperlink = urls2[link_index]
+                            cell.font = F2(name="Arial", size=9, color="0563C1", underline="single")
+                        else:
+                            cell.value = urls2[link_index]
+                            cell.font = F2(name="Arial", size=9)
             for ci, h in enumerate(headers2, 1):
                 col_letter = gcl2(ci)
                 max_len = max(len(str(h)), max((len(str(ws2.cell(row=rn2,column=ci).value or "")) for rn2 in range(2,ws2.max_row+1)), default=0))
