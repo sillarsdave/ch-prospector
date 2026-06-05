@@ -521,6 +521,9 @@ if search_btn:
         }
         try:
             _r = get_redis()
+            # Get sequential search number
+            _search_num = _r.incr("ch_search_number")
+            job["search_number"] = _search_num
             # Cancel any currently running job before starting new one
             try:
                 _old_status = _r.get("ch_status")
@@ -537,8 +540,7 @@ if search_btn:
             _r.delete("ch_results_excel")
             _r.delete("ch_results_csv")
             _r.delete("ch_results_meta")
-            _job_ref = job["job_id"][:8].upper()
-            st.success(f"✅ Search **{_job_ref}** queued! Results will be emailed to **{email_to}** when complete. You can close this browser.")
+            st.success(f"✅ Search **#{_search_num}** queued! Results will be emailed to **{email_to}** when complete. You can close this browser.")
             st.info(f"Searching: **{location}** | **{len(selected_sic_labels)}** industries | **{len(selected_sics)}** SIC codes")
             time.sleep(2)
             st.rerun()
@@ -568,10 +570,10 @@ if _status.get("running"):
     # Show search reference and what search is running
     try:
         _j = json.loads(get_redis().get("ch_job") or "{}")
-        _job_ref = _j.get("job_id","")[:8].upper()
+        _search_num = _j.get("search_number", "?")
         _submitted = _j.get("submitted_at")
         _sub_str = datetime.fromtimestamp(_submitted).strftime("%d %b %Y %H:%M") if _submitted else ""
-        st.caption(f"🔖 Search ref: **{_job_ref}** | Submitted: {_sub_str}")
+        st.caption(f"🔖 Search **#{_search_num}** | Submitted: {_sub_str}")
         _loc = _j.get("location", "")
         _inds = ", ".join([l.split("(")[0].strip() for l in _j.get("sic_labels", [])])
         _types = ", ".join([t.upper() for t in _j.get("company_types", [])]) or "All types"
@@ -595,19 +597,22 @@ if _status.get("running"):
         st.caption(_line1)
         st.caption(f"⚙️ {_line2}")
     except: pass
-    st.caption(f"Stage: {_stage} | Elapsed: {_elapsed_str}")
-
     if _total > 0:
+        # Overall percentage (directors + financials combined)
+        _overall_pct = min((_d + _fn) / (_total * 2), 1.0) * 100
+        st.caption(f"Stage: {_stage} | Elapsed: {_elapsed_str} | **Overall: {_overall_pct:.1f}% complete**")
+
         # Directors progress
         _dir_pct = min(_d / _total, 1.0)
-        st.markdown(f"**Directors** — {_d:,} of {_total:,}")
+        st.markdown(f"**Directors** — {_d:,} of {_total:,} ({_dir_pct*100:.1f}%)")
         st.progress(_dir_pct)
 
         # Financials progress
         _fin_pct = min(_fn / _total, 1.0)
-        st.markdown(f"**Financials** — {_fn:,} of {_total:,}")
+        st.markdown(f"**Financials** — {_fn:,} of {_total:,} ({_fin_pct*100:.1f}%)")
         st.progress(_fin_pct)
     else:
+        st.caption(f"Stage: {_stage} | Elapsed: {_elapsed_str}")
         st.progress(0)
         st.caption("Fetching company list...")
 
@@ -621,8 +626,8 @@ elif _status.get("email_sent"):
     try:
         _current_job = json.loads(get_redis().get("ch_job") or "{}")
         if _status.get("job_id") == _current_job.get("job_id"):
-            _job_ref = _current_job.get("job_id","")[:8].upper()
-            st.success(f"✅ Search complete — {_status.get('results_count',0):,} results emailed.  (Ref: {_job_ref})")
+            _search_num = _current_job.get("search_number", "?")
+            st.success(f"✅ Search **#{_search_num}** complete — {_status.get('results_count',0):,} results emailed.")
     except:
         pass
 

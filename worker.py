@@ -343,6 +343,14 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
         _rl.wait_if_needed()
         r = requests.get(API_BASE + "/advanced-search/companies",
                         params=params, headers=headers, timeout=(5, 10))
+        # Retry on 429 rate limit — up to 3 attempts with backoff
+        if r.status_code == 429:
+            for _attempt in range(3):
+                time.sleep(5 * (_attempt + 1))
+                _rl.wait_if_needed()
+                r = requests.get(API_BASE + "/advanced-search/companies",
+                                params=params, headers=headers, timeout=(5, 10))
+                if r.status_code != 429: break
         if r.status_code not in (200,): break
         data = r.json()
         batch = data.get("items", data.get("companies",[]))
@@ -391,44 +399,21 @@ def run_job(job):
 
         start_time = time.time()
         all_items = []; seen = set()
-        if selected_sics:
-            # Parallelise SIC code fetches — typically the slowest sequential bit
-            # Use 4 workers (rate limiter handles CH API throttling globally)
-            write_status({"running": True, "stage": f"Searching {len(selected_sics)} SIC codes in parallel...",
-                          "dir_done": 0, "fin_done": 0, "total": 0,
-                          "started_at": start_time, "job_id": job.get("job_id",""),
-                          "error": None, "ready_to_email": False})
-            sic_completed = [0]
-            sic_lock = threading.Lock()
-            ex_sic = ThreadPoolExecutor(max_workers=4)
-            try:
-                futures_sic = {ex_sic.submit(fetch_all_for_sic, sic, base_params, api_key): sic
-                               for sic in selected_sics}
-                for future in as_completed(futures_sic):
-                    if is_cancelled(job.get("job_id","")):
-                        print(f"[{datetime.now()}] Job cancelled during SIC search")
-                        break
-                    try:
-                        # Generous per-SIC timeout — a single SIC can have up to 5000 results
-                        # across ~50 paginated requests, each up to 15s = ~12.5min worst case
-                        fetched = future.result(timeout=900)
-                    except Exception:
-                        fetched = []
-                    for c in fetched:
-                        num = c.get("company_number","")
-                        if num and num not in seen:
-                            seen.add(num); all_items.append(c)
-                    with sic_lock: sic_completed[0] += 1
-                    if sic_completed[0] % 5 == 0 or sic_completed[0] == len(selected_sics):
-                        write_status({"running": True,
-                                      "stage": f"Searching SIC codes ({sic_completed[0]}/{len(selected_sics)} done)...",
-                                      "dir_done": 0, "fin_done": 0, "total": 0,
-                                      "started_at": start_time, "job_id": job.get("job_id",""),
-                                      "error": None, "ready_to_email": False})
-            finally:
-                try: ex_sic.shutdown(wait=False, cancel_futures=True)
-                except Exception: pass
-        # Note: empty selected_sics means no companies found — matches original behaviour
+        for i, sic in enumerate(selected_sics):
+            if is_cancelled(job.get("job_id","")):
+                print(f"[{datetime.now()}] Job cancelled during SIC search")
+                break
+            fetched = fetch_all_for_sic(sic, base_params, api_key)
+            for c in fetched:
+                num = c.get("company_number","")
+                if num and num not in seen:
+                    seen.add(num); all_items.append(c)
+            if (i + 1) % 5 == 0 or (i + 1) == len(selected_sics):
+                write_status({"running": True,
+                              "stage": f"Searching SIC codes ({i+1}/{len(selected_sics)} done)...",
+                              "dir_done": 0, "fin_done": 0, "total": 0,
+                              "started_at": start_time, "job_id": job.get("job_id",""),
+                              "error": None, "ready_to_email": False})
 
         today = date.today()
         filtered = []
