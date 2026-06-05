@@ -537,7 +537,8 @@ if search_btn:
             _r.delete("ch_results_excel")
             _r.delete("ch_results_csv")
             _r.delete("ch_results_meta")
-            st.success(f"✅ Search queued! Results will be emailed to **{email_to}** when complete. You can close this browser.")
+            _job_ref = job["job_id"][:8].upper()
+            st.success(f"✅ Search **{_job_ref}** queued! Results will be emailed to **{email_to}** when complete. You can close this browser.")
             st.info(f"Searching: **{location}** | **{len(selected_sic_labels)}** industries | **{len(selected_sics)}** SIC codes")
             time.sleep(2)
             st.rerun()
@@ -564,9 +565,13 @@ if _status.get("running"):
     _stage = _status.get("stage", "...")
 
     st.markdown("### 🔍 Search running in background")
-    # Show what search is running
+    # Show search reference and what search is running
     try:
         _j = json.loads(get_redis().get("ch_job") or "{}")
+        _job_ref = _j.get("job_id","")[:8].upper()
+        _submitted = _j.get("submitted_at")
+        _sub_str = datetime.fromtimestamp(_submitted).strftime("%d %b %Y %H:%M") if _submitted else ""
+        st.caption(f"🔖 Search ref: **{_job_ref}** | Submitted: {_sub_str}")
         _loc = _j.get("location", "")
         _inds = ", ".join([l.split("(")[0].strip() for l in _j.get("sic_labels", [])])
         _types = ", ".join([t.upper() for t in _j.get("company_types", [])]) or "All types"
@@ -607,6 +612,7 @@ if _status.get("running"):
         st.caption("Fetching company list...")
 
     st.info("✉️ Results will be emailed when complete. You can safely close this browser.")
+    st.caption("🔄 Auto-refreshing every 5 seconds...")
     time.sleep(5)
     st.rerun()
 
@@ -615,7 +621,8 @@ elif _status.get("email_sent"):
     try:
         _current_job = json.loads(get_redis().get("ch_job") or "{}")
         if _status.get("job_id") == _current_job.get("job_id"):
-            st.success(f"✅ Search complete — {_status.get('results_count',0):,} results emailed.")
+            _job_ref = _current_job.get("job_id","")[:8].upper()
+            st.success(f"✅ Search complete — {_status.get('results_count',0):,} results emailed.  (Ref: {_job_ref})")
     except:
         pass
 
