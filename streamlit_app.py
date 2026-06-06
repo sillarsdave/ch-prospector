@@ -641,6 +641,10 @@ elif _status.get("email_sent"):
             _meta = json.loads(_meta_raw)
             _loc = _meta.get("location","").replace(" ","_").lower()[:15]
             _date = _meta.get("search_date","results").replace(" ","_")
+            try:
+                _sn = _current_job.get("search_number", "")
+                _sn_str = f"_search_{_sn}" if _sn else ""
+            except: _sn_str = ""
             st.markdown("---")
             st.markdown("**📥 Download results directly:**")
             col_dl1, col_dl2 = st.columns(2)
@@ -648,7 +652,7 @@ elif _status.get("email_sent"):
                 st.download_button(
                     "⬇️ Download Excel",
                     data=base64.b64decode(_excel_b64),
-                    file_name=f"prospector_results_{_loc}_{_date}.xlsx",
+                    file_name=f"prospector_results_{_loc}_{_date}{_sn_str}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
@@ -656,7 +660,7 @@ elif _status.get("email_sent"):
                 st.download_button(
                     "⬇️ Download CSV",
                     data=_csv_data.encode("utf-8-sig"),
-                    file_name=f"prospector_results_{_loc}_{_date}.csv",
+                    file_name=f"prospector_results_{_loc}_{_date}{_sn_str}.csv",
                     mime="text/csv",
                     use_container_width=True
                 )
@@ -761,7 +765,11 @@ if results:
 
     def _make_filename(ext):
         loc = location.strip().replace(" ","_").lower()[:15]
-        return f"prospector_results_{loc}_{date.today().strftime('%d_%B_%Y')}.{ext}"
+        try:
+            _sn = json.loads(get_redis().get("ch_job") or "{}").get("search_number", "")
+            _sn_str = f"_search_{_sn}" if _sn else ""
+        except: _sn_str = ""
+        return f"prospector_results_{loc}_{date.today().strftime('%d_%B_%Y')}{_sn_str}.{ext}"
 
     st.markdown("---")
     col_a, col_b, _ = st.columns([1,1,2])

@@ -758,6 +758,8 @@ def run_job(job):
 
         # Save results to Redis FIRST (download fallback, 7-day expiry)
         search_date = today.strftime("%d %B %Y")
+        loc_str = location.strip().replace(" ","_").lower()[:15]
+        search_num = job.get("search_number", "")
         try:
             _r = get_redis()
             _r.set("ch_results_excel", base64.b64encode(xl_buf.getvalue()).decode(), ex=604800)
@@ -834,18 +836,20 @@ def run_job(job):
             return buf2.getvalue()
 
         def send_sg(to_email, subject, body_text, xl_bytes, csv_bytes, date_str, part=""):
+            suffix = f"_part{part}" if part else ""
+            _sn = f"_search_{search_num}" if search_num else ""
+            _fname_base = f"prospector_results_{loc_str}_{date_str.replace(' ','_')}{_sn}{suffix}"
             import sendgrid as sg_module
             from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
-            suffix = f"_part{part}" if part else ""
             msg = Mail(from_email=from_email, to_emails=to_email,
                        subject=subject, plain_text_content=body_text)
             msg.attachment = Attachment(FileContent(base64.b64encode(xl_bytes).decode()),
-                FileName(f"prospector_results_{date_str}{suffix}.xlsx"),
+                FileName(f"{_fname_base}.xlsx"),
                 FileType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 Disposition("attachment"))
             if csv_bytes:
                 msg.attachment = Attachment(FileContent(base64.b64encode(csv_bytes).decode()),
-                    FileName(f"prospector_results_{date_str}{suffix}.csv"),
+                    FileName(f"{_fname_base}.csv"),
                     FileType("text/csv"), Disposition("attachment"))
             sg_client = sg_module.SendGridAPIClient(api_key=sg_key)
             # Wrap send in a thread to prevent hangs (SendGrid lib has no built-in timeout)
