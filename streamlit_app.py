@@ -59,70 +59,7 @@ st.markdown("""
 
 API_BASE = "https://api.company-information.service.gov.uk"
 
-SIC_OPTIONS = [
-    ("Accounting / bookkeeping (69201)", "69201"),
-    ("Advertising agencies (73110)", "73110"),
-    ("Antiques (47791)", "47791"),
-    ("Architectural activities (71111)", "71111"),
-    ("Architecture (71112)", "71112"),
-    ("Art galleries retail (47781)", "47781"),
-    ("Auditing (69202)", "69202"),
-    ("Barristers (69101)", "69101"),
-    ("Building construction (41202)", "41202"),
-    ("Car dealerships (45111)", "45111"),
-    ("Care agencies / staffing (78300)", "78300"),
-    ("Catering / event catering (56210)", "56210"),
-    ("Cosmetic / plastic surgery clinics (86102)", "86102"),
-    ("Craft brewing (11050)", "11050"),
-    ("Dental practices (86220)", "86220"),
-    ("Distilling / spirits (11010)", "11010"),
-    ("Engineering consultancy (71121)", "71121"),
-    ("Estate agents (68310)", "68310"),
-    ("Event management - conferences (82302)", "82302"),
-    ("Event management - exhibitions (82301)", "82301"),
-    ("General building contractors (41201)", "41201"),
-    ("GP practices (86210)", "86210"),
-    ("HR consulting (70229)", "70229"),
-    ("Immigration consultants (69109)", "69109"),
-    ("Insurance brokers (66220)", "66220"),
-    ("IT consultancy (62020)", "62020"),
-    ("Management consulting (70229)", "70229"),
-    ("Market research (73200)", "73200"),
-    ("Mortgage brokers (66190)", "66190"),
-    ("Opticians (86230)", "86230"),
-    ("Physical wellbeing / spa (96040)", "96040"),
-    ("Physiotherapy (86901)", "86901"),
-    ("PR / communications (70210)", "70210"),
-    ("Property buying & selling (68100)", "68100"),
-    ("Property development (41100)", "41100"),
-    ("Property management (68320)", "68320"),
-    ("Quantity surveying (74902)", "74902"),
-    ("Racehorse owners (93191)", "93191"),
-    ("Recruitment (78200)", "78200"),
-    ("Software development (62012)", "62012"),
-    ("Solicitors (69102)", "69102"),
-    ("Sound recording / music publishing (59200)", "59200"),
-    ("Surveying (71112)", "71112"),
-    ("Tax consulting (69203)", "69203"),
-    ("Tour operators (79120)", "79120"),
-    ("Travel agencies (79110)", "79110"),
-    ("TV programme production (59113)", "59113"),
-    ("Veterinary (75000)", "75000"),
-    ("Video production (59112)", "59112"),
-    ("Vocational training (85320)", "85320"),
-    ("Management consultancy (70210)", "70210"),
-    ("Business support services (82190)", "82190"),
-    ("Translation / interpretation (74300)", "74300"),
-    ("Electrical installation (43210)", "43210"),
-    ("Plumbing / heating (43220)", "43220"),
-    ("Carpentry / joinery (43320)", "43320"),
-    ("Painting / decorating (43341)", "43341"),
-    ("Landscaping (81300)", "81300"),
-    ("Specialist construction (43990)", "43990"),
-    ("Osteopathy / chiropractic (86901)", "86901"),
-    ("Graphic design (74101)", "74101"),
-    ("IT support / infrastructure (62090)", "62090"),
-]
+from sic_data import SIC_OPTIONS, SECONDARY_SIC_OPTIONS, ALL_SEARCH_SICS, SIC_LOOKUP
 
 class RateLimiter:
     def __init__(self, max_calls=575, window=300):
@@ -445,11 +382,44 @@ with st.sidebar:
     st.markdown("### \U0001f4cd Location")
     location = st.text_input("Location", value="Surrey")
 
-    st.markdown("### \U0001f3ed Industry")
-    st.caption("Hold Ctrl/Cmd to select multiple")
-    sic_labels = [s[0] for s in SIC_OPTIONS]
-    sic_codes  = [s[1] for s in SIC_OPTIONS]
-    selected_sic_labels = st.multiselect("Industry / SIC code", sic_labels, default=[])
+    st.markdown("### 🏭 Industry")
+    all_industries_mode = st.checkbox(
+        "🔍 All non-excluded industries",
+        value=False,
+        help=(
+            "Searches all ~536 eligible SIC codes in one job. "
+            "Financial services, public sector, education, cleaning, beauty, "
+            "takeaways, taxis, market stalls and other low-value sectors are excluded. "
+            "Recommended: set a minimum net assets filter to keep results manageable. "
+            "Large areas (e.g. London) may take many hours."
+        )
+    )
+    if all_industries_mode:
+        selected_sic_labels = []
+        st.caption(f"ℹ️ Will loop through **{len(ALL_SEARCH_SICS)}** eligible SIC codes. "
+                   "Set a minimum net assets filter below to limit results.")
+    else:
+        st.caption("**🏆 Priority Industries**")
+        st.caption("Hold Ctrl/Cmd to select multiple")
+        _priority_labels = [s[0] for s in SIC_OPTIONS]
+        selected_priority_labels = st.multiselect(
+            "priority_industry_select",
+            _priority_labels,
+            default=[],
+            label_visibility="collapsed"
+        )
+        st.caption("**📋 Secondary Industries**")
+        st.caption("Full SIC list — all non-excluded industries not in the priority list above")
+        _secondary_labels = [s[0] for s in SECONDARY_SIC_OPTIONS]
+        selected_secondary_labels = st.multiselect(
+            "secondary_industry_select",
+            _secondary_labels,
+            default=[],
+            label_visibility="collapsed"
+        )
+        selected_sic_labels = selected_priority_labels + selected_secondary_labels
+    # Build a combined label→code mapping for job submission
+    _all_sic_map = {label: code for label, code in SIC_OPTIONS + SECONDARY_SIC_OPTIONS}
 
     st.markdown("### \U0001f3e2 Company Type")
     type_ltd = st.checkbox("Private Limited (Ltd)", value=True)
@@ -489,13 +459,18 @@ if "results" not in st.session_state:
 if search_btn:
     if not api_key:
         st.error("Please enter your API key in the sidebar.")
-    elif not selected_sic_labels:
-        st.warning("Please select at least one industry.")
+    elif not selected_sic_labels and not all_industries_mode:
+        st.warning("Please select at least one industry, or tick 'All non-excluded industries'.")
     elif not email_to:
         st.warning("Please enter an email address to receive results.")
     else:
         import uuid
-        selected_sics = [sic_codes[sic_labels.index(l)] for l in selected_sic_labels]
+        if all_industries_mode:
+            selected_sics = ALL_SEARCH_SICS
+            sic_labels_for_job = ["All non-excluded industries"]
+        else:
+            selected_sics = [_all_sic_map[l] for l in selected_sic_labels if l in _all_sic_map]
+            sic_labels_for_job = selected_sic_labels
         selected_types = []
         if type_ltd: selected_types.append("ltd")
         if type_llp: selected_types.append("llp")
@@ -505,7 +480,8 @@ if search_btn:
             "job_id": str(uuid.uuid4()),
             "location": location,
             "sic_codes": selected_sics,
-            "sic_labels": selected_sic_labels,
+            "sic_labels": sic_labels_for_job,
+            "all_industries": all_industries_mode,
             "company_types": selected_types,
             "fetch_financials": fetch_financials_flag,
             "min_age": int(min_age),
@@ -717,7 +693,10 @@ if results:
                 "Score": score_str, "First Name": first_n, "Surname": last_n,
                 "Company": company_name, "Number": num, "Address": addr_str,
                 "SIC": sics,
-                "Category": ", ".join([l.split("(")[0].strip() for l in selected_sic_labels if any(s in sics for s in [sic_codes[sic_labels.index(l)]])]) or "",
+                "Category": ", ".join(
+                    SIC_LOOKUP.get(s.strip(), f"SIC {s.strip()}")
+                    for s in c.get("sic_codes", []) if s.strip()
+                ),
                 "Incorporated": inc, "Age": age,
                 "Total Assets": fin.get("total_assets",""), "Net Assets": fin.get("net_assets",""),
                 "Fixed Assets": fin.get("fixed_assets",""), "Current Assets": fin.get("current_assets",""),

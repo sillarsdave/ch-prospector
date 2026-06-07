@@ -17,6 +17,7 @@ from base64 import b64encode
 from datetime import date, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
+from sic_data import SIC_LOOKUP
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
@@ -586,8 +587,10 @@ def run_job(job):
             dirs = director_cache.get(num,[])
             if one_per_co and dirs: dirs = dirs[:1]
             rows_data = dirs if dirs else [None]
-            category = ", ".join([l.split("(")[0].strip() for l in sic_labels
-                                  if any(sic in sics for sic in [l.split("(")[-1].rstrip(")")])]) or ""
+            category = ", ".join(
+                SIC_LOOKUP.get(s, f"SIC {s}")
+                for s in c.get("sic_codes", []) if s
+            )
             for o in rows_data:
                 name = appt = ""
                 if o:
