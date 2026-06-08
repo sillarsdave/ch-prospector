@@ -867,7 +867,9 @@ try:
     _ar_raw = _ar.get("ch_status")
     if _ar_raw:
         _ar_status = json.loads(_ar_raw)
-        if _ar_status.get("running") or (_ar_status.get("ready_to_email") and not _ar_status.get("email_sent")):
+        if (_ar_status.get("running") or
+                _ar_status.get("stage") == "Queued" or
+                (_ar_status.get("ready_to_email") and not _ar_status.get("email_sent"))):
             time.sleep(5)
             st.rerun()
 except:
