@@ -404,6 +404,46 @@ def run_job(job):
         base_params = {"location": location, "company_status": "active"}
         if company_types: base_params["company_type"] = ",".join(company_types)
 
+        # ── Event log — defined here so it's available throughout the entire job ──
+        event_log = []
+
+        def log_event(msg):
+            """Append to event log and print to Railway deploy logs."""
+            event_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            print(f"[{datetime.now()}] {msg}")
+
+        def send_event_log_email(subject_suffix, extra_lines=None):
+            """Send the event log as a plain-text email — called on timeout or error."""
+            if not email_to or not sg_key: return
+            try:
+                import sendgrid as _sg
+                from sendgrid.helpers.mail import Mail as _Mail
+                lines = [
+                    "Companies House Prospector — Event Log",
+                    "=" * 52,
+                    f"Location      : {location}",
+                    f"SIC codes     : {len(selected_sics)}",
+                    f"Net assets min: £{min_net_assets:,}" if min_net_assets else "Net assets min: None",
+                    f"Companies     : {total:,}" if total else "Companies     : SIC search not yet complete",
+                    "",
+                    "EVENT LOG",
+                    "─" * 40,
+                ] + event_log
+                if extra_lines:
+                    lines += ["", "─" * 40] + extra_lines
+                subject = f"Prospector — {subject_suffix} — {location}"
+                msg = _Mail(from_email="sillarsdave@gmail.com", to_emails=email_to,
+                            subject=subject, plain_text_content="\n".join(lines))
+                _holder = [None]
+                def _do():
+                    try: _holder[0] = _sg.SendGridAPIClient(api_key=sg_key).send(msg)
+                    except Exception as _e: print(f"[{datetime.now()}] Event log email error: {_e}")
+                _t = threading.Thread(target=_do, daemon=True)
+                _t.start(); _t.join(timeout=60)
+                print(f"[{datetime.now()}] Event log email sent: {subject}")
+            except Exception as _e:
+                print(f"[{datetime.now()}] Failed to send event log email: {_e}")
+
         log_event(f"Job started — {location} | {len(selected_sics)} SIC codes"
                   + (f" | £{min_net_assets:,}+ net assets" if min_net_assets else "")
                   + (f" | {min_age}yr+ age" if min_age else ""))
@@ -512,48 +552,7 @@ def run_job(job):
             return num, fetch_financials(num, api_key)
 
         job_id_str = job.get("job_id","")
-
-        # ── Event log — timestamped record of job progress ────────────────────
-        # Appended throughout the run. Emailed automatically on error or timeout
-        # so you can diagnose what happened without needing Railway logs.
-        event_log = []
-
-        def log_event(msg):
-            """Append to event log and print to Railway deploy logs."""
-            event_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-            print(f"[{datetime.now()}] {msg}")
-
-        def send_event_log_email(subject_suffix, extra_lines=None):
-            """Send the event log as a plain-text email — called on timeout or error."""
-            if not email_to or not sg_key: return
-            try:
-                import sendgrid as _sg
-                from sendgrid.helpers.mail import Mail as _Mail
-                lines = [
-                    "Companies House Prospector — Event Log",
-                    "=" * 52,
-                    f"Location      : {location}",
-                    f"SIC codes     : {len(selected_sics)}",
-                    f"Net assets min: £{min_net_assets:,}" if min_net_assets else "Net assets min: None",
-                    f"Companies     : {total:,}" if total else "Companies     : SIC search not yet complete",
-                    "",
-                    "EVENT LOG",
-                    "─" * 40,
-                ] + event_log
-                if extra_lines:
-                    lines += ["", "─" * 40] + extra_lines
-                subject = f"Prospector — {subject_suffix} — {location}"
-                msg = _Mail(from_email="sillarsdave@gmail.com", to_emails=email_to,
-                            subject=subject, plain_text_content="\n".join(lines))
-                _holder = [None]
-                def _do():
-                    try: _holder[0] = _sg.SendGridAPIClient(api_key=sg_key).send(msg)
-                    except Exception as _e: print(f"[{datetime.now()}] Event log email error: {_e}")
-                _t = threading.Thread(target=_do, daemon=True)
-                _t.start(); _t.join(timeout=60)
-                print(f"[{datetime.now()}] Event log email sent: {subject}")
-            except Exception as _e:
-                print(f"[{datetime.now()}] Failed to send event log email: {_e}")
+        fin_ex = ThreadPoolExecutor(max_workers=5)
         dir_ex = ThreadPoolExecutor(max_workers=6)
         dir_futures = {}   # future -> company (only for companies that passed filter)
 
