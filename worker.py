@@ -562,17 +562,26 @@ def run_job(job):
             if excl_dormant and "dormant" in c.get("company_status","").lower(): continue
             if excl_dormant and fin.get("is_dormant", False): continue
             if min_net_assets > 0:
-                _na_raw = fin.get("net_assets", None)
-                if _na_raw is not None and _na_raw != "":
+                def _parse_fin(s):
+                    if s is None or s == "": return None
                     try:
-                        # Parse formatted strings like "£149k", "£1.2m", "-£500k"
-                        _s = str(_na_raw).replace("£","").replace(",","").strip()
+                        _s = str(s).replace("£","").replace(",","").strip()
                         _neg = _s.startswith("-"); _s = _s.lstrip("-")
                         _mult = 1_000_000 if _s.endswith("m") else (1_000 if _s.endswith("k") else 1)
-                        _na_val = float(_s.rstrip("mk")) * _mult * (-1 if _neg else 1)
-                        if _na_val < min_net_assets: continue
-                    except: pass
-                # If net_assets is None/empty (data unavailable) — include the company
+                        return float(_s.rstrip("mk")) * _mult * (-1 if _neg else 1)
+                    except: return None
+                na_val = _parse_fin(fin.get("net_assets", None))
+                if na_val is not None:
+                    # Net assets data available — use it directly
+                    if na_val < min_net_assets: continue
+                else:
+                    # Net assets missing — use cash at bank + total assets as proxies
+                    # Keep only if BOTH are significant (above threshold)
+                    ca_val = _parse_fin(fin.get("cash_at_bank", None))
+                    ta_val = _parse_fin(fin.get("total_assets", None))
+                    ca_ok = ca_val is not None and ca_val >= min_net_assets
+                    ta_ok = ta_val is not None and ta_val >= min_net_assets
+                    if not (ca_ok and ta_ok): continue
             emp_s = fin.get("employees","")
             if (emp_min > 0 or emp_max > 0) and emp_s:
                 try:
