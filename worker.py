@@ -161,37 +161,42 @@ def fetch_financials(company_number, api_key):
         doc_url = meta.get("links",{}).get("document","")
         if not doc_url: return result
         if "application/xhtml+xml" not in meta.get("resources",{}): return result
-        # iXBRL doc fetch with HARD total time + size limits (prevents indefinite hangs)
-        _fetch_start = time.time()
-        _max_fetch_seconds = 25
-        _max_fetch_bytes = 15 * 1024 * 1024  # 15MB
-        try:
-            doc_r = requests.get(doc_url,
-                                 headers={**headers, "Accept": "application/xhtml+xml"},
-                                 timeout=(5, 15), stream=True)
-        except requests.exceptions.RequestException:
+        # iXBRL doc fetch — wrapped in a daemon thread with a TRUE hard wall-clock timeout.
+        # iter_content() blocks internally between chunks, so a wall-clock check inside
+        # the loop never fires while waiting. A server drip-feeding data just under the
+        # per-chunk read timeout can hold a thread indefinitely. thread.join(timeout=N)
+        # always fires after N seconds regardless of what the thread is doing.
+        _MAX_FETCH_BYTES = 15 * 1024 * 1024  # 15 MB size cap
+        _HARD_TIMEOUT    = 30                  # seconds — absolute ceiling per document
+        _content_holder  = [None]
+
+        def _fetch_doc():
+            try:
+                _r = requests.get(doc_url,
+                                  headers={**headers, "Accept": "application/xhtml+xml"},
+                                  timeout=(5, 15), stream=True)
+                if _r.status_code != 200:
+                    _r.close()
+                    return
+                _chunks = []; _total = 0
+                for _chunk in _r.iter_content(chunk_size=65536):
+                    if _chunk:
+                        _total += len(_chunk)
+                        if _total > _MAX_FETCH_BYTES:
+                            _r.close()
+                            return
+                        _chunks.append(_chunk)
+                _r.close()
+                _content_holder[0] = b"".join(_chunks)
+            except Exception:
+                pass
+
+        _fetch_thread = threading.Thread(target=_fetch_doc, daemon=True)
+        _fetch_thread.start()
+        _fetch_thread.join(timeout=_HARD_TIMEOUT)
+        if _content_holder[0] is None:
             return result
-        if doc_r.status_code != 200:
-            doc_r.close()
-            return result
-        _chunks = []
-        _total_bytes = 0
-        try:
-            for _chunk in doc_r.iter_content(chunk_size=65536):
-                if time.time() - _fetch_start > _max_fetch_seconds:
-                    doc_r.close()
-                    return result
-                if _chunk:
-                    _total_bytes += len(_chunk)
-                    if _total_bytes > _max_fetch_bytes:
-                        doc_r.close()
-                        return result
-                    _chunks.append(_chunk)
-        except requests.exceptions.RequestException:
-            doc_r.close()
-            return result
-        doc_r.close()
-        _doc_content = b"".join(_chunks)
+        _doc_content = _content_holder[0]
         _doc_text_preview = _doc_content[:2000].decode("utf-8", errors="ignore")
         # Check for dormant in the actual document content or URL
         if "dormant" in doc_url.lower() or "dormant" in _doc_text_preview.lower():
@@ -489,7 +494,7 @@ def run_job(job):
             if not fetch_fin_flag: return
             phase_start = time.time()
             MAX_PHASE_SECONDS = 86400  # 24-hour safety net
-            ex = ThreadPoolExecutor(max_workers=3)
+            ex = ThreadPoolExecutor(max_workers=5)
             try:
                 futures = {ex.submit(fetch_fin, c): c for c in all_items}
                 for future in as_completed(futures):
@@ -505,6 +510,15 @@ def run_job(job):
                     except Exception:
                         pass
                     with fin_lock: fin_done[0] += 1
+                    write_status({"running": True, "stage": "Loading directors and financials...",
+                                  "dir_done": dir_done[0], "fin_done": fin_done[0],
+                                  "total": total, "started_at": start_time,
+                                  "job_id": job.get("job_id", ""),
+                                  "error": None, "ready_to_email": False})
+                    if fin_done[0] % 500 == 0:
+                        elapsed = (time.time() - start_time) / 3600
+                        print(f"[{datetime.now()}] Financials: {fin_done[0]:,}/{total:,} "
+                              f"({fin_done[0]/total*100:.1f}%) — {elapsed:.1f}h elapsed")
             finally:
                 try: ex.shutdown(wait=False, cancel_futures=True)
                 except Exception: pass
@@ -512,9 +526,8 @@ def run_job(job):
         t1 = threading.Thread(target=run_dirs, daemon=True)
         t2 = threading.Thread(target=run_fins, daemon=True)
         t1.start(); t2.start()
-        # 48 hours total wall-clock max — generous safety net for very large searches
-        # (per-company timeouts still apply to catch individual stalls)
-        _job_deadline = time.time() + 172800
+        # 72 hours total wall-clock max — allows large all-industries searches to complete
+        _job_deadline = time.time() + 259200
         for _t in (t1, t2):
             _remaining = max(1, _job_deadline - time.time())
             _t.join(timeout=_remaining)
