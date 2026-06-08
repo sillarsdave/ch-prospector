@@ -562,12 +562,17 @@ def run_job(job):
             if excl_dormant and "dormant" in c.get("company_status","").lower(): continue
             if excl_dormant and fin.get("is_dormant", False): continue
             if min_net_assets > 0:
-                try:
-                    _na = fin.get("net_assets", None)
-                    if _na is not None:
-                        val = float(_na)
-                        if val < min_net_assets: continue
-                except: pass
+                _na_raw = fin.get("net_assets", None)
+                if _na_raw is not None and _na_raw != "":
+                    try:
+                        # Parse formatted strings like "£149k", "£1.2m", "-£500k"
+                        _s = str(_na_raw).replace("£","").replace(",","").strip()
+                        _neg = _s.startswith("-"); _s = _s.lstrip("-")
+                        _mult = 1_000_000 if _s.endswith("m") else (1_000 if _s.endswith("k") else 1)
+                        _na_val = float(_s.rstrip("mk")) * _mult * (-1 if _neg else 1)
+                        if _na_val < min_net_assets: continue
+                    except: pass
+                # If net_assets is None/empty (data unavailable) — include the company
             emp_s = fin.get("employees","")
             if (emp_min > 0 or emp_max > 0) and emp_s:
                 try:
