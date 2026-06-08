@@ -376,6 +376,7 @@ def write_status(status):
 
 def run_job(job):
     api_key        = os.environ.get("CH_API_KEY","")
+    sg_key         = os.environ.get("SENDGRID_API_KEY","")
     email_to       = job.get("email_to","")
     location       = job.get("location","Surrey")
     selected_sics  = job.get("sic_codes",[])
@@ -402,6 +403,10 @@ def run_job(job):
     try:
         base_params = {"location": location, "company_status": "active"}
         if company_types: base_params["company_type"] = ",".join(company_types)
+
+        log_event(f"Job started — {location} | {len(selected_sics)} SIC codes"
+                  + (f" | £{min_net_assets:,}+ net assets" if min_net_assets else "")
+                  + (f" | {min_age}yr+ age" if min_age else ""))
 
         start_time = time.time()
         all_items = []; seen = set()
@@ -437,6 +442,9 @@ def run_job(job):
         all_items = filtered
         total = len(all_items)
 
+        log_event(f"SIC search complete — {total:,} companies (after age/dormant filter)")
+        log_event(f"Starting pipeline: financials for all {total:,}, directors only for passing companies")
+
         write_status({"running": True, "stage": f"Loading directors and financials for {total:,} companies...",
                       "dir_done": 0, "fin_done": 0, "total": total,
                       "started_at": time.time(), "error": None, "ready_to_email": False})
@@ -444,7 +452,48 @@ def run_job(job):
         director_cache = {}; financials_cache = {}
         dir_lock = threading.Lock(); fin_lock = threading.Lock()
         dir_done = [0]; fin_done = [0]
+        passing_companies = []          # companies that passed the filter
         start_time = time.time()
+        _job_deadline = time.time() + 259200  # 72-hour overall ceiling
+
+        # ── Shared helpers ────────────────────────────────────────────────────
+        def _parse_fin_val(s):
+            """Parse a formatted currency string (£1.2m, £500k, -£100) to float.
+            Returns None if the value is missing or unparseable."""
+            if s is None or s == "": return None
+            try:
+                _s = str(s).replace("£","").replace(",","").strip()
+                _neg = _s.startswith("-"); _s = _s.lstrip("-")
+                _mult = 1_000_000 if _s.endswith("m") else (1_000 if _s.endswith("k") else 1)
+                return float(_s.rstrip("mk")) * _mult * (-1 if _neg else 1)
+            except: return None
+
+        def _passes_filter(c, fin):
+            """Return True if this company passes all user filters.
+            Called immediately when financials arrive — only passing companies
+            get director fetches, saving ~90% of director API calls."""
+            if excl_dormant and "dormant" in c.get("company_status","").lower(): return False
+            if excl_dormant and fin.get("is_dormant", False): return False
+            if min_net_assets > 0:
+                na_val = _parse_fin_val(fin.get("net_assets", None))
+                if na_val is not None:
+                    if na_val < min_net_assets: return False
+                else:
+                    # No net assets — use cash at bank AND total assets as proxies
+                    ca_val = _parse_fin_val(fin.get("cash_at_bank", None))
+                    ta_val = _parse_fin_val(fin.get("total_assets", None))
+                    if not (ca_val is not None and ca_val >= min_net_assets and
+                            ta_val is not None and ta_val >= min_net_assets):
+                        return False
+            if emp_min > 0 or emp_max > 0:
+                emp_s = fin.get("employees","")
+                if emp_s:
+                    try:
+                        e = int(emp_s)
+                        if emp_min > 0 and e < emp_min: return False
+                        if emp_max > 0 and e > emp_max: return False
+                    except: pass
+            return True
 
         def fetch_dir(c):
             num = c.get("company_number","")
@@ -462,135 +511,163 @@ def run_job(job):
             if not num: return num, {}
             return num, fetch_financials(num, api_key)
 
-        def run_dirs():
-            phase_start = time.time()
-            MAX_PHASE_SECONDS = 86400  # 24-hour safety net
-            ex = ThreadPoolExecutor(max_workers=6)
-            try:
-                futures = {ex.submit(fetch_dir, c): c for c in all_items}
-                for future in as_completed(futures):
-                    if is_cancelled(job.get("job_id", "")):
-                        print(f"[{datetime.now()}] Job cancelled during directors fetch")
-                        return
-                    if time.time() - phase_start > MAX_PHASE_SECONDS:
-                        print(f"[{datetime.now()}] Directors phase 24-hour safety timeout reached — moving on")
-                        break
-                    try:
-                        num, active = future.result()
-                        with dir_lock: director_cache[num] = active
-                    except Exception:
-                        pass
-                    with dir_lock: dir_done[0] += 1
-                    write_status({"running": True, "stage": "Loading directors and financials...",
-                                  "dir_done": dir_done[0], "fin_done": fin_done[0],
-                                  "total": total, "started_at": start_time,
-                                  "job_id": job.get("job_id", ""),
-                                  "error": None, "ready_to_email": False})
-            finally:
-                try: ex.shutdown(wait=False, cancel_futures=True)
-                except Exception: pass
+        job_id_str = job.get("job_id","")
 
-        def run_fins():
-            if not fetch_fin_flag: return
-            phase_start = time.time()
-            MAX_PHASE_SECONDS = 86400  # 24-hour safety net
-            ex = ThreadPoolExecutor(max_workers=5)
+        # ── Event log — timestamped record of job progress ────────────────────
+        # Appended throughout the run. Emailed automatically on error or timeout
+        # so you can diagnose what happened without needing Railway logs.
+        event_log = []
+
+        def log_event(msg):
+            """Append to event log and print to Railway deploy logs."""
+            event_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            print(f"[{datetime.now()}] {msg}")
+
+        def send_event_log_email(subject_suffix, extra_lines=None):
+            """Send the event log as a plain-text email — called on timeout or error."""
+            if not email_to or not sg_key: return
             try:
-                futures = {ex.submit(fetch_fin, c): c for c in all_items}
-                for future in as_completed(futures):
-                    if is_cancelled(job.get("job_id", "")):
+                import sendgrid as _sg
+                from sendgrid.helpers.mail import Mail as _Mail
+                lines = [
+                    "Companies House Prospector — Event Log",
+                    "=" * 52,
+                    f"Location      : {location}",
+                    f"SIC codes     : {len(selected_sics)}",
+                    f"Net assets min: £{min_net_assets:,}" if min_net_assets else "Net assets min: None",
+                    f"Companies     : {total:,}" if total else "Companies     : SIC search not yet complete",
+                    "",
+                    "EVENT LOG",
+                    "─" * 40,
+                ] + event_log
+                if extra_lines:
+                    lines += ["", "─" * 40] + extra_lines
+                subject = f"Prospector — {subject_suffix} — {location}"
+                msg = _Mail(from_email="sillarsdave@gmail.com", to_emails=email_to,
+                            subject=subject, plain_text_content="\n".join(lines))
+                _holder = [None]
+                def _do():
+                    try: _holder[0] = _sg.SendGridAPIClient(api_key=sg_key).send(msg)
+                    except Exception as _e: print(f"[{datetime.now()}] Event log email error: {_e}")
+                _t = threading.Thread(target=_do, daemon=True)
+                _t.start(); _t.join(timeout=60)
+                print(f"[{datetime.now()}] Event log email sent: {subject}")
+            except Exception as _e:
+                print(f"[{datetime.now()}] Failed to send event log email: {_e}")
+        dir_ex = ThreadPoolExecutor(max_workers=6)
+        dir_futures = {}   # future -> company (only for companies that passed filter)
+
+        # ── Phase 1: Financials → filter → directors (all running concurrently) ─
+        # fin_ex fetches financials for every company.
+        # As each result arrives the filter is applied immediately.
+        # Passing companies are submitted to dir_ex right away — so director
+        # fetches run in parallel with the remaining financial fetches.
+        # This means we only call the officers API for companies we'll actually use.
+        fin_phase_start = time.time()
+        try:
+            if not fetch_fin_flag:
+                # Financials disabled — all companies go straight to directors
+                fin_done[0] = total
+                for c in all_items:
+                    passing_companies.append(c)
+                    dir_futures[dir_ex.submit(fetch_dir, c)] = c
+            else:
+                fin_futures = {fin_ex.submit(fetch_fin, c): c for c in all_items}
+                for fin_future in as_completed(fin_futures):
+                    if is_cancelled(job_id_str):
                         print(f"[{datetime.now()}] Job cancelled during financials fetch")
-                        return
-                    if time.time() - phase_start > MAX_PHASE_SECONDS:
-                        print(f"[{datetime.now()}] Financials phase 24-hour safety timeout reached — moving on")
                         break
+                    if time.time() > _job_deadline or time.time() - fin_phase_start > 86400:
+                        print(f"[{datetime.now()}] Financials timeout — proceeding with partial results")
+                        break
+                    c = fin_futures[fin_future]
                     try:
-                        num, fin = future.result()
+                        num, fin = fin_future.result()
                         with fin_lock: financials_cache[num] = fin
+                        if _passes_filter(c, fin):
+                            passing_companies.append(c)
+                            dir_futures[dir_ex.submit(fetch_dir, c)] = c
                     except Exception:
                         pass
                     with fin_lock: fin_done[0] += 1
                     write_status({"running": True, "stage": "Loading directors and financials...",
                                   "dir_done": dir_done[0], "fin_done": fin_done[0],
                                   "total": total, "started_at": start_time,
-                                  "job_id": job.get("job_id", ""),
-                                  "error": None, "ready_to_email": False})
+                                  "job_id": job_id_str, "error": None, "ready_to_email": False})
                     if fin_done[0] % 500 == 0:
                         elapsed = (time.time() - start_time) / 3600
-                        print(f"[{datetime.now()}] Financials: {fin_done[0]:,}/{total:,} "
-                              f"({fin_done[0]/total*100:.1f}%) — {elapsed:.1f}h elapsed")
-            finally:
-                try: ex.shutdown(wait=False, cancel_futures=True)
-                except Exception: pass
+                        log_event(f"Financials: {fin_done[0]:,}/{total:,} "
+                                  f"({fin_done[0]/total*100:.1f}%) | "
+                                  f"{len(passing_companies):,} passed filter | "
+                                  f"{elapsed:.1f}h elapsed")
+        finally:
+            try: fin_ex.shutdown(wait=False, cancel_futures=True)
+            except Exception: pass
 
-        t1 = threading.Thread(target=run_dirs, daemon=True)
-        t2 = threading.Thread(target=run_fins, daemon=True)
-        t1.start(); t2.start()
-        # 72 hours total wall-clock max — allows large all-industries searches to complete
-        _job_deadline = time.time() + 259200
-        for _t in (t1, t2):
-            _remaining = max(1, _job_deadline - time.time())
-            _t.join(timeout=_remaining)
-        if t1.is_alive() or t2.is_alive():
-            print(f"[{datetime.now()}] WARNING: threads still running after 48-hour deadline — proceeding with partial results")
+        if time.time() > _job_deadline or time.time() - fin_phase_start > 86400:
+            log_event(f"TIMEOUT — Financials hit time limit at {fin_done[0]:,}/{total:,} "
+                      f"| {len(passing_companies):,} passed filter")
+            send_event_log_email("Financials Timeout — Partial Results",
+                                 [f"Financials completed: {fin_done[0]:,}/{total:,}",
+                                  f"Companies passed filter: {len(passing_companies):,}",
+                                  "Job will continue building results from data collected so far."])
+        else:
+            log_event(f"Financials complete — {fin_done[0]:,}/{total:,} fetched "
+                      f"| {len(passing_companies):,} passed filter")
 
-        if is_cancelled(job.get("job_id","")):
+        # ── Phase 2: Collect director results ─────────────────────────────────
+        # Most director fetches will already be complete (they ran concurrently
+        # throughout phase 1). This loop just collects any still-in-flight results.
+        log_event(f"Director collection: {len(dir_futures):,} passing companies to process")
+        dir_phase_start = time.time()
+        try:
+            for dir_future in as_completed(dir_futures):
+                if is_cancelled(job_id_str):
+                    print(f"[{datetime.now()}] Job cancelled during directors fetch")
+                    break
+                if time.time() > _job_deadline or time.time() - dir_phase_start > 86400:
+                    log_event(f"TIMEOUT — Directors hit time limit at {dir_done[0]:,}/{len(dir_futures):,}")
+                    send_event_log_email("Directors Timeout — Partial Results",
+                                         [f"Directors completed: {dir_done[0]:,}/{len(dir_futures):,}",
+                                          "Job will continue building results from data collected so far."])
+                    break
+                try:
+                    num, active = dir_future.result()
+                    with dir_lock: director_cache[num] = active
+                except Exception:
+                    pass
+                with dir_lock: dir_done[0] += 1
+                write_status({"running": True, "stage": "Loading directors and financials...",
+                              "dir_done": dir_done[0], "fin_done": fin_done[0],
+                              "total": total, "started_at": start_time,
+                              "job_id": job_id_str, "error": None, "ready_to_email": False})
+        finally:
+            try: dir_ex.shutdown(wait=False, cancel_futures=True)
+            except Exception: pass
+
+        log_event(f"Directors complete — {dir_done[0]:,}/{len(dir_futures):,} fetched")
+
+        if is_cancelled(job_id_str):
             print(f"[{datetime.now()}] Job cancelled — skipping results and email")
-            write_status({"running": False, "stage": "Cancelled", "job_id": job.get("job_id",""),
+            write_status({"running": False, "stage": "Cancelled", "job_id": job_id_str,
                           "error": None, "email_sent": False, "ready_to_email": False})
             return
 
         write_status({"running": True, "stage": "Building results...",
                       "dir_done": dir_done[0], "fin_done": fin_done[0],
                       "total": total, "started_at": start_time,
-                      "job_id": job.get("job_id",""),
+                      "job_id": job_id_str,
                       "error": None, "ready_to_email": False})
 
         def sort_key(c):
             fin = financials_cache.get(c.get("company_number",""),{})
             score = calc_score(fin)
-            na = fin.get("net_assets", None)
-            if na is None: na = -999999
-            try: na = float(na)
-            except: na = -999999
-            return (score, na)
+            na_val = _parse_fin_val(fin.get("net_assets", None))
+            return (score, na_val if na_val is not None else -999999)
 
-        results = []
-        for c in all_items:
-            num = c.get("company_number","")
-            fin = financials_cache.get(num,{})
-            if excl_dormant and "dormant" in c.get("company_status","").lower(): continue
-            if excl_dormant and fin.get("is_dormant", False): continue
-            if min_net_assets > 0:
-                def _parse_fin(s):
-                    if s is None or s == "": return None
-                    try:
-                        _s = str(s).replace("£","").replace(",","").strip()
-                        _neg = _s.startswith("-"); _s = _s.lstrip("-")
-                        _mult = 1_000_000 if _s.endswith("m") else (1_000 if _s.endswith("k") else 1)
-                        return float(_s.rstrip("mk")) * _mult * (-1 if _neg else 1)
-                    except: return None
-                na_val = _parse_fin(fin.get("net_assets", None))
-                if na_val is not None:
-                    # Net assets data available — use it directly
-                    if na_val < min_net_assets: continue
-                else:
-                    # Net assets missing — use cash at bank + total assets as proxies
-                    # Keep only if BOTH are significant (above threshold)
-                    ca_val = _parse_fin(fin.get("cash_at_bank", None))
-                    ta_val = _parse_fin(fin.get("total_assets", None))
-                    ca_ok = ca_val is not None and ca_val >= min_net_assets
-                    ta_ok = ta_val is not None and ta_val >= min_net_assets
-                    if not (ca_ok and ta_ok): continue
-            emp_s = fin.get("employees","")
-            if (emp_min > 0 or emp_max > 0) and emp_s:
-                try:
-                    e = int(emp_s)
-                    if emp_min > 0 and e < emp_min: continue
-                    if emp_max > 0 and e > emp_max: continue
-                except: pass
-            results.append(c)
-
+        # Companies already filtered by _passes_filter during the financial phase.
+        # Just sort — no re-filtering needed.
+        results = list(passing_companies)
         results.sort(key=sort_key, reverse=True)
 
         rows = []
@@ -626,15 +703,6 @@ def run_job(job):
                 first_n, last_n = split_director_name(name)
                 ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
                 li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {linkedin_company_keyword(company_name)}")
-                def _parse_numeric(s):
-                    """Convert £1.0m / £500k to float for sorting."""
-                    if not s: return -999999999
-                    try:
-                        s = str(s).replace("£","").replace(",","").strip()
-                        neg = s.startswith("-"); s = s.lstrip("-")
-                        mult = 1_000_000 if s.endswith("m") else (1_000 if s.endswith("k") else 1)
-                        return float(s.rstrip("mk")) * mult * (-1 if neg else 1)
-                    except: return -999999999
 
                 def _parse_numeric(s):
                     """Convert £1.0m / £500k to float for sorting."""
@@ -904,10 +972,13 @@ def run_job(job):
             csv_bytes = csv_str.encode("utf-8-sig")
             total_size = len(xl_bytes) + len(csv_bytes)
 
+            log_event(f"Results built — {len(results):,} companies | {len(rows):,} export rows")
+            log_event(f"Building email — file size: {total_size/1024/1024:.1f}MB")
+
             body_base = ["Your Companies House Prospector search has completed.", ""]
             for k, v in criteria.items():
                 body_base.append(f"{k}: {v}")
-            body_base.append("")
+            body_base += ["", "─" * 40, "EVENT LOG", "─" * 40] + event_log + [""]
 
             if total_size <= SIZE_LIMIT:
                 # Single email
@@ -949,12 +1020,16 @@ def run_job(job):
                       "completed_at": time.time(), "results_count": len(rows),
                       "ready_to_email": False, "email_sent": email_sent, "error": None})
 
+        log_event(f"Job complete — {len(rows):,} results | email_sent={email_sent}")
         print(f"[{datetime.now()}] Job complete — {len(rows)} results, email_sent={email_sent}")
 
     except Exception as e:
+        log_event(f"ERROR: {str(e)}")
         write_status({"running": False, "stage": "Error", "error": str(e),
                       "traceback": traceback.format_exc(), "ready_to_email": False})
         print(f"[{datetime.now()}] Job error: {e}")
+        send_event_log_email("Job Error",
+                             [f"Error: {str(e)}", "", "Traceback:", traceback.format_exc()])
 
 
 
