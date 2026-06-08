@@ -535,6 +535,19 @@ def run_job(job):
                     except: pass
             return True
 
+        def _on_dir_complete(future):
+            """Callback — runs immediately when a director future completes.
+            Updates director_cache and dir_done from whichever worker thread
+            finished the fetch, so dir_done reflects real progress during Phase 1."""
+            try:
+                num, active = future.result()
+                with dir_lock:
+                    director_cache[num] = active
+            except Exception:
+                pass
+            with dir_lock:
+                dir_done[0] += 1
+
         def fetch_dir(c):
             num = c.get("company_number","")
             if not num: return num, []
@@ -569,7 +582,9 @@ def run_job(job):
                 fin_done[0] = total
                 for c in all_items:
                     passing_companies.append(c)
-                    dir_futures[dir_ex.submit(fetch_dir, c)] = c
+                    _df = dir_ex.submit(fetch_dir, c)
+                    _df.add_done_callback(_on_dir_complete)
+                    dir_futures[_df] = c
             else:
                 fin_futures = {fin_ex.submit(fetch_fin, c): c for c in all_items}
                 for fin_future in as_completed(fin_futures):
@@ -585,7 +600,9 @@ def run_job(job):
                         with fin_lock: financials_cache[num] = fin
                         if _passes_filter(c, fin):
                             passing_companies.append(c)
-                            dir_futures[dir_ex.submit(fetch_dir, c)] = c
+                            _df = dir_ex.submit(fetch_dir, c)
+                            _df.add_done_callback(_on_dir_complete)
+                            dir_futures[_df] = c
                     except Exception:
                         pass
                     with fin_lock: fin_done[0] += 1
@@ -614,9 +631,9 @@ def run_job(job):
             log_event(f"Financials complete — {fin_done[0]:,}/{total:,} fetched "
                       f"| {len(passing_companies):,} passed filter")
 
-        # ── Phase 2: Collect director results ─────────────────────────────────
-        # Most director fetches will already be complete (they ran concurrently
-        # throughout phase 1). This loop just collects any still-in-flight results.
+        # ── Phase 2: Wait for any remaining director futures ─────────────────
+        # Callbacks already collected results as they completed during Phase 1.
+        # This loop just ensures all in-flight futures finish and writes status.
         log_event(f"Director collection: {len(dir_futures):,} passing companies to process")
         dir_phase_start = time.time()
         try:
@@ -630,12 +647,7 @@ def run_job(job):
                                          [f"Directors completed: {dir_done[0]:,}/{len(dir_futures):,}",
                                           "Job will continue building results from data collected so far."])
                     break
-                try:
-                    num, active = dir_future.result()
-                    with dir_lock: director_cache[num] = active
-                except Exception:
-                    pass
-                with dir_lock: dir_done[0] += 1
+                # Data already handled by _on_dir_complete callback — just update status
                 write_status({"running": True, "stage": "Loading directors and financials...",
                               "dir_done": dir_done[0], "fin_done": fin_done[0],
                               "total": total, "started_at": start_time,
