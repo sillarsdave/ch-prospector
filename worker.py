@@ -832,6 +832,12 @@ def run_job(job):
         ws_acct.column_dimensions["B"].width = 14
         ws_acct.column_dimensions["C"].width = 60
 
+        end_time = time.time()
+        _duration_secs = int(end_time - start_time)
+        _duration_str = f"{_duration_secs // 3600}h {(_duration_secs % 3600) // 60}m {_duration_secs % 60}s"
+        _start_dt = datetime.fromtimestamp(start_time)
+        _end_dt = datetime.fromtimestamp(end_time)
+
         ws2 = wb.create_sheet("Search Criteria")
         _company_types_str = ", ".join([t.upper() for t in company_types]) if company_types else "All"
         _age_str = f"{min_age}yr+" if min_age and not max_age else (f"{min_age}–{max_age}yrs" if min_age and max_age else "Any")
@@ -850,6 +856,9 @@ def run_job(job):
             "After filters": f"{len(results):,}",
             "Results in export": f"{len(rows):,}",
             "Export date": today.strftime("%d %B %Y"),
+            "Search started": _start_dt.strftime("%d %B %Y %H:%M:%S"),
+            "Search ended": _end_dt.strftime("%d %B %Y %H:%M:%S"),
+            "Duration": _duration_str,
         }
         for i, (k,v) in enumerate(criteria.items(), 1):
             ws2.cell(row=i, column=1, value=k).font = Font(bold=True, name="Arial")
