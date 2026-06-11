@@ -783,8 +783,9 @@ def run_job(job):
         # Sort by net assets descending (numeric now so sorts correctly)
         df = df.sort_values("Net Assets", ascending=False, na_position="last").reset_index(drop=True)
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
-        base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"]]
-        headers_xl = base_cols + ["CH company","Officers","LinkedIn"]
+        _addr_cols = [c for c in ["Address", "Business Address"] if c in df.columns]
+        base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"] + _addr_cols]
+        headers_xl = base_cols + ["CH company","Officers","LinkedIn"] + _addr_cols
         CURRENCY_COLS = {"Total Assets","Net Assets","Fixed Assets","Current Assets","Cash at Bank"}
         NUMBER_COLS = {"Employees","Age"}
         hdr_fill = PatternFill("solid", fgColor="1a4a2e")
@@ -798,7 +799,7 @@ def run_job(job):
         fill_odd  = PatternFill("solid", fgColor="FFFFFF")
         for rn, (_, row) in enumerate(df.iterrows(), 2):
             fill = fill_even if rn % 2 == 0 else fill_odd
-            row_vals = [row[c] for c in base_cols] + [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
+            row_vals = [row[c] for c in base_cols] + [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]] + [row[c] for c in _addr_cols]
             for ci, val in enumerate(row_vals, 1):
                 h = headers_xl[ci-1] if ci <= len(headers_xl) else ""
                 cell = ws.cell(row=rn, column=ci, value=val)
@@ -936,8 +937,9 @@ def run_job(job):
             sub_df = pd.DataFrame(row_subset)
             wb2 = WB2(); ws2 = wb2.active
             ws2.title = "Prospects"
-            base_cols2 = [c for c in sub_df.columns if c not in ["CH Link","LinkedIn"]]
-            headers2 = base_cols2 + ["CH company","Officers","LinkedIn"]
+            _addr_cols2 = [c for c in ["Address", "Business Address"] if c in sub_df.columns]
+            base_cols2 = [c for c in sub_df.columns if c not in ["CH Link","LinkedIn"] + _addr_cols2]
+            headers2 = base_cols2 + ["CH company","Officers","LinkedIn"] + _addr_cols2
             hf2 = PF2("solid", fgColor="1a4a2e")
             for i, h in enumerate(headers2, 1):
                 cell = ws2.cell(row=1, column=i, value=h)
@@ -948,7 +950,7 @@ def run_job(job):
             fe2 = PF2("solid", fgColor="EBF3FB"); fo2 = PF2("solid", fgColor="FFFFFF")
             for rn, (_, row) in enumerate(sub_df.iterrows(), 2):
                 fill = fe2 if rn%2==0 else fo2
-                rv = [row[c] for c in base_cols2] + [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
+                rv = [row[c] for c in base_cols2] + [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]] + [row[c] for c in _addr_cols2]
                 for ci, val in enumerate(rv, 1):
                     cell = ws2.cell(row=rn, column=ci, value=val)
                     cell.fill = fill; cell.font = F2(name="Arial", size=9)
