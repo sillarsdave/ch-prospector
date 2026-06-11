@@ -128,7 +128,7 @@ def fetch_financials(company_number, api_key):
     from bs4 import BeautifulSoup
     result = {"accounts_date":"","cash_at_bank":"","total_assets":"","net_assets":"",
               "fixed_assets":"","current_assets":"","employees":"","accountant":"",
-              "is_dormant": False}
+              "business_address":"","is_dormant": False}
     try:
         auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
         headers = {"Authorization": auth}
@@ -308,6 +308,31 @@ def fetch_financials(company_number, api_key):
                 accountant = accountant.strip()[:60]
             result["accountant"] = accountant
         except: pass
+
+        # Business address — address tags excluding the registered office context (_7_8)
+        try:
+            def get_addr_parts(soup, tag_names):
+                parts = []
+                for tag_name in tag_names:
+                    for tag in soup.find_all(attrs={"name": True}):
+                        name_attr = tag.get("name", "")
+                        bare = name_attr.split(":")[-1] if ":" in name_attr else name_attr
+                        if bare.lower() != tag_name.lower(): continue
+                        ctx = tag.get("contextref", "")
+                        if "_7_8" in ctx or "registeredoffice" in ctx.lower(): continue
+                        val = tag.get_text(strip=True)
+                        if val: parts.append(val)
+                        break
+                return parts
+
+            addr_parts = get_addr_parts(soup, [
+                "AddressLine1", "AddressLine2", "AddressLine3",
+                "PrincipalLocation-CityOrTown", "CountyRegion", "PostalCodeZip"
+            ])
+            if addr_parts:
+                result["business_address"] = ", ".join(addr_parts)
+        except: pass
+
     except: pass
     return result
 
@@ -733,6 +758,7 @@ def run_job(job):
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
                     "Company": company_name, "Type": {"ltd": "LTD", "llp": "LLP", "plc": "PLC", "private-limited-guarant-nsc": "LTD", "private-unlimited": "LTD"}.get(c.get("company_type","").lower(), c.get("company_type","").upper()),
                     "Address": addr_str,
+                    "Business Address": fin.get("business_address",""),
                     "Category": category, "Incorporated": inc, "Age": age,
                     "Fixed Assets": _parse_numeric(fin.get("fixed_assets","")),
                     "Current Assets": _parse_numeric(fin.get("current_assets","")),
@@ -757,7 +783,14 @@ def run_job(job):
         # Sort by net assets descending (numeric now so sorts correctly)
         df = df.sort_values("Net Assets", ascending=False, na_position="last").reset_index(drop=True)
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
-        base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"]]
+        # Explicit column order — Address columns last before CH/LinkedIn
+        _addr_cols   = [c for c in ["Address", "Business Address"] if c in df.columns]
+        _fixed_front = [c for c in ["Score","First Name","Surname","Company","Type","Category",
+                                    "Incorporated","Age","Fixed Assets","Current Assets",
+                                    "Total Assets","Net Assets","Cash at Bank","Employees",
+                                    "Accounts Date","Dir. Appointed","Accountant"] if c in df.columns]
+        _remaining   = [c for c in df.columns if c not in _fixed_front + _addr_cols + ["CH Link","LinkedIn"]]
+        base_cols    = _fixed_front + _remaining + _addr_cols
         headers_xl = base_cols + ["CH company","Officers","LinkedIn"]
         CURRENCY_COLS = {"Total Assets","Net Assets","Fixed Assets","Current Assets","Cash at Bank"}
         NUMBER_COLS = {"Employees","Age"}
@@ -910,7 +943,13 @@ def run_job(job):
             sub_df = pd.DataFrame(row_subset)
             wb2 = WB2(); ws2 = wb2.active
             ws2.title = "Prospects"
-            base_cols2 = [c for c in sub_df.columns if c not in ["CH Link","LinkedIn"]]
+            _addr_cols2   = [c for c in ["Address", "Business Address"] if c in sub_df.columns]
+            _fixed_front2 = [c for c in ["Score","First Name","Surname","Company","Type","Category",
+                                         "Incorporated","Age","Fixed Assets","Current Assets",
+                                         "Total Assets","Net Assets","Cash at Bank","Employees",
+                                         "Accounts Date","Dir. Appointed","Accountant"] if c in sub_df.columns]
+            _remaining2   = [c for c in sub_df.columns if c not in _fixed_front2 + _addr_cols2 + ["CH Link","LinkedIn"]]
+            base_cols2    = _fixed_front2 + _remaining2 + _addr_cols2
             headers2 = base_cols2 + ["CH company","Officers","LinkedIn"]
             hf2 = PF2("solid", fgColor="1a4a2e")
             for i, h in enumerate(headers2, 1):
