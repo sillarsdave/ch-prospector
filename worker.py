@@ -766,7 +766,7 @@ def run_job(job):
                     "Employees": _parse_emp(fin.get("employees","")),
                     "Accounts Date": fin.get("accounts_date",""),
                     "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
-                    "Address": addr_str,
+                    "Registered Address": addr_str,
                     "Business Address": fin.get("business_address",""),
                     "CH Link": ch_url, "LinkedIn": li_url,
                 })
@@ -784,7 +784,7 @@ def run_job(job):
         if "Net Assets" in df.columns and len(df) > 0:
             df = df.sort_values("Net Assets", ascending=False, na_position="last").reset_index(drop=True)
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
-        _addr_cols = [c for c in ["Address", "Business Address"] if c in df.columns]
+        _addr_cols = [c for c in ["Registered Address", "Business Address"] if c in df.columns]
         base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"] + _addr_cols]
         headers_xl = base_cols + ["CH company","Officers","LinkedIn"] + _addr_cols
         CURRENCY_COLS = {"Total Assets","Net Assets","Fixed Assets","Current Assets","Cash at Bank"}
@@ -940,7 +940,7 @@ def run_job(job):
             sub_df = pd.DataFrame(row_subset)
             wb2 = WB2(); ws2 = wb2.active
             ws2.title = "Prospects"
-            _addr_cols2 = [c for c in ["Address", "Business Address"] if c in sub_df.columns]
+            _addr_cols2 = [c for c in ["Registered Address", "Business Address"] if c in sub_df.columns]
             base_cols2 = [c for c in sub_df.columns if c not in ["CH Link","LinkedIn"] + _addr_cols2]
             headers2 = base_cols2 + ["CH company","Officers","LinkedIn"] + _addr_cols2
             hf2 = PF2("solid", fgColor="1a4a2e")
