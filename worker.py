@@ -128,7 +128,7 @@ def fetch_financials(company_number, api_key):
     from bs4 import BeautifulSoup
     result = {"accounts_date":"","cash_at_bank":"","total_assets":"","net_assets":"",
               "fixed_assets":"","current_assets":"","employees":"","accountant":"",
-              "is_dormant": False}
+              "business_address":"","is_dormant": False}
     try:
         auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
         headers = {"Authorization": auth}
@@ -308,6 +308,31 @@ def fetch_financials(company_number, api_key):
                 accountant = accountant.strip()[:60]
             result["accountant"] = accountant
         except: pass
+
+        # Business address — address tags excluding the registered office context (_7_8)
+        try:
+            def get_addr_parts(soup, tag_names):
+                parts = []
+                for tag_name in tag_names:
+                    for tag in soup.find_all(attrs={"name": True}):
+                        name_attr = tag.get("name", "")
+                        bare = name_attr.split(":")[-1] if ":" in name_attr else name_attr
+                        if bare.lower() != tag_name.lower(): continue
+                        ctx = tag.get("contextref", "")
+                        if "_7_8" in ctx or "registeredoffice" in ctx.lower(): continue
+                        val = tag.get_text(strip=True)
+                        if val: parts.append(val)
+                        break
+                return parts
+
+            addr_parts = get_addr_parts(soup, [
+                "AddressLine1", "AddressLine2", "AddressLine3",
+                "PrincipalLocation-CityOrTown", "CountyRegion", "PostalCodeZip"
+            ])
+            if addr_parts:
+                result["business_address"] = ", ".join(addr_parts)
+        except: pass
+
     except: pass
     return result
 
@@ -732,7 +757,6 @@ def run_job(job):
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
                     "Company": company_name, "Type": {"ltd": "LTD", "llp": "LLP", "plc": "PLC", "private-limited-guarant-nsc": "LTD", "private-unlimited": "LTD"}.get(c.get("company_type","").lower(), c.get("company_type","").upper()),
-                    "Address": addr_str,
                     "Category": category, "Incorporated": inc, "Age": age,
                     "Fixed Assets": _parse_numeric(fin.get("fixed_assets","")),
                     "Current Assets": _parse_numeric(fin.get("current_assets","")),
@@ -742,6 +766,8 @@ def run_job(job):
                     "Employees": _parse_emp(fin.get("employees","")),
                     "Accounts Date": fin.get("accounts_date",""),
                     "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
+                    "Address": addr_str,
+                    "Business Address": fin.get("business_address",""),
                     "CH Link": ch_url, "LinkedIn": li_url,
                 })
 
