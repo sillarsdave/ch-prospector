@@ -781,7 +781,8 @@ def run_job(job):
 
         df = pd.DataFrame(rows)
         # Sort by net assets descending (numeric now so sorts correctly)
-        df = df.sort_values("Net Assets", ascending=False, na_position="last").reset_index(drop=True)
+        if "Net Assets" in df.columns and len(df) > 0:
+            df = df.sort_values("Net Assets", ascending=False, na_position="last").reset_index(drop=True)
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
         _addr_cols = [c for c in ["Address", "Business Address"] if c in df.columns]
         base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"] + _addr_cols]
@@ -811,7 +812,9 @@ def run_job(job):
                 elif h in NUMBER_COLS and val is not None:
                     cell.number_format = '#,##0'
                     cell.alignment = Alignment(horizontal="right", vertical="center")
-                if ci > len(base_cols):
+                _link_start = len(base_cols) + 1
+                _link_end   = len(base_cols) + 3
+                if _link_start <= ci <= _link_end:
                     link_index = ci - len(base_cols) - 1
                     labels = ["Open", "Officers", "LinkedIn"]
                     urls = [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
@@ -955,7 +958,9 @@ def run_job(job):
                     cell = ws2.cell(row=rn, column=ci, value=val)
                     cell.fill = fill; cell.font = F2(name="Arial", size=9)
                     cell.alignment = AL2(horizontal="left", vertical="center")
-                    if ci > len(base_cols2):
+                    _ls2 = len(base_cols2) + 1
+                    _le2 = len(base_cols2) + 3
+                    if _ls2 <= ci <= _le2:
                         link_index = ci - len(base_cols2) - 1
                         lbls = ["Open", "Officers", "LinkedIn"]
                         urls2 = [row["CH Link"], f"{row['CH Link']}/officers", row["LinkedIn"]]
