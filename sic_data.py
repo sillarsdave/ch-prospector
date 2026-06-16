@@ -721,12 +721,10 @@ SIC_LOOKUP = {
 # ─── Exclusion rules ──────────────────────────────────────────────────────────
 # These prefixes exclude entire SIC sectors from search and the secondary list.
 _EXCLUDED_PREFIXES = (
-    "01", "02", "03",   # Agriculture, forestry, fishing
     "64", "65", "66",   # Financial services (priority codes 66190/66220 handled via priority list)
     "84",               # Public administration and defence
     "85",               # Education (vocational training 85320 available via priority list)
     "88",               # Social work and charities
-    "92",               # Gambling and betting
     "94",               # Membership organisations (religious, political, charities)
     "99",               # Extraterritorial organisations
 )
@@ -738,19 +736,6 @@ _EXCLUDED_SPECIFIC = {
     "47750",  # Retail of cosmetics and beauty products
     "47799",  # Second-hand goods retail
     "47810", "47820", "47890",  # Market stalls (food, textiles, other)
-    "49320",  # Taxi operation
-    "56102",  # Unlicensed restaurants and cafes
-    "56103",  # Takeaway food shops
-    "56290",  # Other food service activities (mobile catering, street food)
-    "56301",  # Licensed clubs
-    "56302",  # Public houses and bars
-    "81210", "81220", "81290",  # Cleaning activities
-    "90030",  # Individual artistic creation
-    "93110",  # Operation of sports facilities (amateur)
-    "93120",  # Activities of sports clubs (amateur)
-    "96010",  # Laundry and dry-cleaning
-    "96020",  # Hairdressing and beauty treatment
-    "96090",  # Other personal services (dog walking, nail bars, etc.)
 }
 
 
