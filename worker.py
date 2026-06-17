@@ -719,7 +719,7 @@ def run_job(job):
             if inc:
                 try:
                     y,m2,d2 = inc.split("-")
-                    age = str((today-date(int(y),int(m2),int(d2))).days//365)
+                    age = (today-date(int(y),int(m2),int(d2))).days//365
                 except: pass
             fin = financials_cache.get(num,{})
             score = calc_score(fin)
