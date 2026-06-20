@@ -256,7 +256,7 @@ def fetch_financials(company_number, api_key):
             return None
 
         result["total_assets"]   = fv(get_val(soup,["TotalAssetsLessCurrentLiabilities","TotalAssets","BalanceSheetTotal","Assets"]))
-        result["net_assets"]     = fv(get_val(soup,["NetAssetsLiabilities","NetAssets","ShareholdersEquity","Equity"]))
+        result["net_assets"]     = fv(get_val(soup,["NetAssetsLiabilities","NetAssets","ShareholdersEquity","Equity","MembersOtherInterests","TotalMembersInterests","MembersCapital"]))
         result["fixed_assets"]   = fv(get_val(soup,["FixedAssets","TotalFixedAssets","NonCurrentAssets"]))
         result["current_assets"] = fv(get_val(soup,["CurrentAssets","TotalCurrentAssets"]))
         result["cash_at_bank"]    = fv(get_val(soup,["CashBankInHand","CashBankOnHand","Cash","CashAndCashEquivalents","CashAtBankAndInHand"]))
