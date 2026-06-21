@@ -363,11 +363,18 @@ def calc_score(fin):
     if ca and ca > 200_000: score += 1
     return score
 
-def fetch_all_for_sic(sic_code, base_params, api_key):
+def _fetch_one_type(sic_code, base_params, api_key, company_type_value):
+    """Fetch all pages for a single company_type value. The Companies House
+    advanced-search endpoint does not reliably honour comma-separated
+    company_type values (e.g. 'ltd,llp') — only the first type tends to be
+    returned — so each type must be requested separately and merged by the
+    caller."""
     auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
     headers = {"Authorization": auth}
     params_base = {**base_params}
     if sic_code: params_base["sic_codes"] = sic_code
+    if company_type_value: params_base["company_type"] = company_type_value
+    elif "company_type" in params_base: del params_base["company_type"]
     items = []; start = 0; total = None
     while True:
         params = {**params_base, "size": 100, "start_index": start}
@@ -387,21 +394,28 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
         batch = data.get("items", data.get("companies",[]))
         if total is None: total = data.get("hits", data.get("total_results",0))
         if not batch: break
-        # ── TEMP DEBUG: log company_type breakdown of this batch ──
-        try:
-            _types_seen = {}
-            for _c in batch:
-                _t = _c.get("company_type", "MISSING")
-                _types_seen[_t] = _types_seen.get(_t, 0) + 1
-            print(f"[LLP-DEBUG] SIC={sic_code} start={start} requested_types={params_base.get('company_type')} "
-                  f"batch_size={len(batch)} type_breakdown={_types_seen}", flush=True)
-        except Exception as _dbg_e:
-            print(f"[LLP-DEBUG] logging error: {_dbg_e}", flush=True)
-        # ── END TEMP DEBUG ──
         items.extend(batch)
         start += len(batch)
         if start >= (total or 0) or start >= 5000: break
     return items
+
+def fetch_all_for_sic(sic_code, base_params, api_key):
+    """Fetch all companies for a SIC code, looping over each requested
+    company_type separately (see _fetch_one_type) and merging/de-duplicating
+    the results by company_number."""
+    requested_types = base_params.get("company_type", "")
+    type_list = [t.strip() for t in requested_types.split(",") if t.strip()] if requested_types else [None]
+
+    seen_numbers = set()
+    merged = []
+    for ct in type_list:
+        batch_items = _fetch_one_type(sic_code, base_params, api_key, ct)
+        for c in batch_items:
+            num = c.get("company_number")
+            if num and num in seen_numbers: continue
+            if num: seen_numbers.add(num)
+            merged.append(c)
+    return merged
 
 def write_status(status):
     try:
