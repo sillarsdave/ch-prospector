@@ -410,6 +410,17 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
     merged = []
     for ct in type_list:
         batch_items = _fetch_one_type(sic_code, base_params, api_key, ct)
+        # ── TEMP DEBUG: confirm what each isolated type fetch actually returns ──
+        try:
+            _types_seen = {}
+            for _c in batch_items:
+                _t = _c.get("company_type", "MISSING")
+                _types_seen[_t] = _types_seen.get(_t, 0) + 1
+            print(f"[LLP-DEBUG2] SIC={sic_code} requested_ct={ct!r} "
+                  f"items_returned={len(batch_items)} type_breakdown={_types_seen}", flush=True)
+        except Exception as _dbg_e:
+            print(f"[LLP-DEBUG2] logging error: {_dbg_e}", flush=True)
+        # ── END TEMP DEBUG ──
         for c in batch_items:
             num = c.get("company_number")
             if num and num in seen_numbers: continue
