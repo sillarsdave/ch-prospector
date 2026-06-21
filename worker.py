@@ -387,6 +387,17 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
         batch = data.get("items", data.get("companies",[]))
         if total is None: total = data.get("hits", data.get("total_results",0))
         if not batch: break
+        # ── TEMP DEBUG: log company_type breakdown of this batch ──
+        try:
+            _types_seen = {}
+            for _c in batch:
+                _t = _c.get("company_type", "MISSING")
+                _types_seen[_t] = _types_seen.get(_t, 0) + 1
+            print(f"[LLP-DEBUG] SIC={sic_code} start={start} requested_types={params_base.get('company_type')} "
+                  f"batch_size={len(batch)} type_breakdown={_types_seen}", flush=True)
+        except Exception as _dbg_e:
+            print(f"[LLP-DEBUG] logging error: {_dbg_e}", flush=True)
+        # ── END TEMP DEBUG ──
         items.extend(batch)
         start += len(batch)
         if start >= (total or 0) or start >= 5000: break
