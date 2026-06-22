@@ -438,6 +438,8 @@ def run_job(job):
     min_net_assets = job.get("min_net_assets", 0)
     emp_min        = job.get("emp_min", 0)
     emp_max        = job.get("emp_max", 0)
+    dir_age_min    = job.get("dir_age_min", 0)
+    dir_age_max    = job.get("dir_age_max", 0)
     one_per_co     = job.get("one_per_company", True)
     linkedin_hyperlinks = job.get("linkedin_hyperlinks", True)
     company_types  = job.get("company_types", ["ltd","llp"])
@@ -787,6 +789,14 @@ def run_job(job):
                     try: return int(str(s).strip()) if s else None
                     except: return None
 
+                # Director age filter — skip if outside requested range
+                # If dir_age is None (no DOB on record), only skip if a filter is set
+                if dir_age_min > 0 or dir_age_max > 0:
+                    if dir_age is None:
+                        continue  # can't verify age — exclude if filter is active
+                    if dir_age_min > 0 and dir_age < dir_age_min: continue
+                    if dir_age_max > 0 and dir_age > dir_age_max: continue
+
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
                     "Company": company_name, "Type": {"ltd": "LTD", "llp": "LLP", "plc": "PLC", "private-limited-guarant-nsc": "LTD", "private-unlimited": "LTD"}.get(c.get("company_type","").lower(), c.get("company_type","").upper()),
@@ -905,6 +915,7 @@ def run_job(job):
         _company_types_str = ", ".join([t.upper() for t in company_types]) if company_types else "All"
         _age_str = f"{min_age}yr+" if min_age and not max_age else (f"{min_age}–{max_age}yrs" if min_age and max_age else "Any")
         _emp_str = f"{emp_min}–{emp_max}" if (emp_min or emp_max) else "Any"
+        _dir_age_str = f"{dir_age_min}–{dir_age_max}" if (dir_age_min or dir_age_max) else "Any"
         criteria = {
             "Location": location,
             "Industries": ", ".join(sic_labels),
@@ -913,6 +924,7 @@ def run_job(job):
             "Exclude dormant": "Yes" if excl_dormant else "No",
             "Min net assets": f"£{min_net_assets:,}" if min_net_assets else "None",
             "Employees": _emp_str,
+            "Director age": _dir_age_str,
             "Fetch financials": "Yes" if fetch_fin_flag else "No",
             "One contact per company": "Yes" if one_per_co else "No",
             "Companies found": f"{total:,}",
