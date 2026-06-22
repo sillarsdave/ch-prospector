@@ -430,8 +430,8 @@ with st.sidebar:
     excl_dormant = st.checkbox("Exclude dormant", value=True)
     min_age = st.number_input("Min age (years)", value=3, min_value=0, max_value=50)
     max_age = st.number_input("Max age (years)", value=0, min_value=0, max_value=100, help="0 = no limit")
-    min_net_assets = st.number_input("Min net assets (£)", value=0, min_value=0)
-    max_net_assets = st.number_input("Max net assets (£)", value=0, min_value=0, help="0 = no limit")
+    min_net_assets = st.number_input("Min net assets (\u00a3)", value=0, min_value=0)
+    max_net_assets = st.number_input("Max net assets (\u00a3)", value=0, min_value=0, help="0 = no limit")
 
     st.markdown("### \U0001f4c8 Financial Data")
     fetch_financials_flag = st.checkbox("Fetch financials (slower)", value=True)
@@ -441,6 +441,11 @@ with st.sidebar:
     col3, col4 = st.columns(2)
     with col3: emp_min = st.number_input("Min", value=0, min_value=0, key="emp_min")
     with col4: emp_max = st.number_input("Max", value=0, min_value=0, key="emp_max", help="0 = no limit")
+
+    st.markdown("### \U0001f9d3 Director Age Filter")
+    col5, col6 = st.columns(2)
+    with col5: dir_age_min = st.number_input("Min age", value=0, min_value=0, max_value=100, key="dir_age_min", help="0 = no limit")
+    with col6: dir_age_max = st.number_input("Max age", value=0, min_value=0, max_value=100, key="dir_age_max", help="0 = no limit")
 
     st.markdown("### \u2699\ufe0f Output")
     one_per_company = st.checkbox("One contact per company", value=True)
@@ -492,6 +497,8 @@ if search_btn:
             "max_net_assets": int(max_net_assets),
             "emp_min": int(emp_min),
             "emp_max": int(emp_max),
+            "dir_age_min": int(dir_age_min),
+            "dir_age_max": int(dir_age_max),
             "one_per_company": one_per_company,
             "linkedin_hyperlinks": linkedin_hyperlinks,
             "email_to": email_to,
@@ -564,6 +571,8 @@ if _status.get("running"):
         _emp_min = _j.get("emp_min", 0)
         _emp_max = _j.get("emp_max", 0)
         _emp_str = f"{_emp_min}-{_emp_max} employees" if _emp_min or _emp_max else ""
+        _dam = _j.get("dir_age_min", 0); _dax = _j.get("dir_age_max", 0)
+        _dir_age_str = f"Dir age {_dam}-{_dax}" if _dam or _dax else ""
         _fin_str = "Financials on" if _j.get("fetch_financials") else "Financials off"
         _dir_str = "1 contact per company" if _j.get("one_per_company") else "All directors"
         _dormant_str = "Excl. dormant" if _j.get("excl_dormant") else "Incl. dormant"
@@ -572,6 +581,7 @@ if _status.get("running"):
         _line2_parts = [_types, _age_str, _dormant_str, _fin_str, _dir_str]
         if _mna_str: _line2_parts.append(_mna_str)
         if _emp_str: _line2_parts.append(_emp_str)
+        if _dir_age_str: _line2_parts.append(_dir_age_str)
         _line2 = " | ".join(_line2_parts)
         st.caption(_line1)
         st.caption(f"⚙️ {_line2}")
@@ -826,6 +836,7 @@ if results:
             if type_plc: _co_types.append("PLC")
             _age_str = f"{int(min_age)}yr+" if min_age and not max_age else (f"{int(min_age)}-{int(max_age)}yrs" if min_age and max_age else "Any")
             _emp_str = f"{int(emp_min)}-{int(emp_max)}" if (emp_min or emp_max) else "Any"
+            _dir_age_str2 = f"{int(dir_age_min)}-{int(dir_age_max)}" if (dir_age_min or dir_age_max) else "Any"
             criteria_data = {
                 "Location": location,
                 "Industries": ", ".join(selected_sic_labels),
@@ -835,6 +846,7 @@ if results:
                 "Min net assets": f"£{int(min_net_assets):,}" if min_net_assets else "None",
                 "Max net assets": f"£{int(max_net_assets):,}" if max_net_assets else "None",
                 "Employees": _emp_str,
+                "Director age": _dir_age_str2,
                 "Fetch financials": "Yes" if fetch_financials_flag else "No",
                 "One contact per company": "Yes" if one_per_company else "No",
                 "Results in export": f"{len(rows):,}",

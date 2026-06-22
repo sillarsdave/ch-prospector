@@ -437,6 +437,8 @@ def run_job(job):
     excl_dormant   = job.get("excl_dormant", True)
     min_net_assets = job.get("min_net_assets", 0)
     max_net_assets = job.get("max_net_assets", 0)
+    dir_age_min    = job.get("dir_age_min", 0)
+    dir_age_max    = job.get("dir_age_max", 0)
     emp_min        = job.get("emp_min", 0)
     emp_max        = job.get("emp_max", 0)
     one_per_co     = job.get("one_per_company", True)
@@ -763,13 +765,27 @@ def run_job(job):
                 for s in c.get("sic_codes", []) if s
             )
             for o in rows_data:
-                name = appt = ""
+                name = appt = ""; dir_age = None
                 if o:
                     name = " ".join(reversed([p.strip() for p in o.get("name","").split(",")]))
                     appt = o.get("appointed_on","")
+                    dob = o.get("date_of_birth", {})
+                    dob_year = dob.get("year"); dob_month = dob.get("month")
+                    if dob_year:
+                        try:
+                            dir_age = today.year - int(dob_year) - (
+                                1 if (today.month < int(dob_month)) else 0
+                            ) if dob_month else today.year - int(dob_year)
+                        except: dir_age = None
                 first_n, last_n = split_director_name(name)
                 ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
                 li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {linkedin_company_keyword(company_name)}")
+
+                # Director age filter
+                if dir_age_min > 0 or dir_age_max > 0:
+                    if dir_age is None: continue
+                    if dir_age_min > 0 and dir_age < dir_age_min: continue
+                    if dir_age_max > 0 and dir_age > dir_age_max: continue
 
                 def _parse_numeric(s):
                     """Convert £1.0m / £500k to float for sorting."""
@@ -796,7 +812,7 @@ def run_job(job):
                     "Cash at Bank": _parse_numeric(fin.get("cash_at_bank","")),
                     "Employees": _parse_emp(fin.get("employees","")),
                     "Accounts Date": fin.get("accounts_date",""),
-                    "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
+                    "Dir. Appointed": appt, "Dir. Age": dir_age, "Accountant": fin.get("accountant",""),
                     "Registered Address": addr_str,
                     "Business Address": fin.get("business_address",""),
                     "CH Link": ch_url, "LinkedIn": li_url,
@@ -903,6 +919,7 @@ def run_job(job):
         _company_types_str = ", ".join([t.upper() for t in company_types]) if company_types else "All"
         _age_str = f"{min_age}yr+" if min_age and not max_age else (f"{min_age}–{max_age}yrs" if min_age and max_age else "Any")
         _emp_str = f"{emp_min}–{emp_max}" if (emp_min or emp_max) else "Any"
+        _dir_age_str = f"{dir_age_min}–{dir_age_max}" if (dir_age_min or dir_age_max) else "Any"
         criteria = {
             "Location": location,
             "Industries": ", ".join(sic_labels),
@@ -912,6 +929,7 @@ def run_job(job):
             "Min net assets": f"£{min_net_assets:,}" if min_net_assets else "None",
             "Max net assets": f"£{max_net_assets:,}" if max_net_assets else "None",
             "Employees": _emp_str,
+            "Director age": _dir_age_str,
             "Fetch financials": "Yes" if fetch_fin_flag else "No",
             "One contact per company": "Yes" if one_per_co else "No",
             "Companies found": f"{total:,}",
