@@ -436,10 +436,9 @@ def run_job(job):
     max_age        = job.get("max_age", 0)
     excl_dormant   = job.get("excl_dormant", True)
     min_net_assets = job.get("min_net_assets", 0)
+    max_net_assets = job.get("max_net_assets", 0)
     emp_min        = job.get("emp_min", 0)
     emp_max        = job.get("emp_max", 0)
-    dir_age_min    = job.get("dir_age_min", 0)
-    dir_age_max    = job.get("dir_age_max", 0)
     one_per_co     = job.get("one_per_company", True)
     linkedin_hyperlinks = job.get("linkedin_hyperlinks", True)
     company_types  = job.get("company_types", ["ltd","llp"])
@@ -497,7 +496,9 @@ def run_job(job):
                 print(f"[{datetime.now()}] Failed to send event log email: {_e}")
 
         log_event(f"Job started — {location} | {len(selected_sics)} SIC codes"
-                  + (f" | £{min_net_assets:,}+ net assets" if min_net_assets else "")
+                  + (f" | £{min_net_assets:,}–£{max_net_assets:,} net assets" if min_net_assets and max_net_assets else
+                     f" | £{min_net_assets:,}+ net assets" if min_net_assets else
+                     f" | max £{max_net_assets:,} net assets" if max_net_assets else "")
                   + (f" | {min_age}yr+ age" if min_age else ""))
 
         start_time = time.time()
@@ -577,6 +578,9 @@ def run_job(job):
                     if not (ca_val is not None and ca_val >= min_net_assets and
                             ta_val is not None and ta_val >= min_net_assets):
                         return False
+            if max_net_assets > 0:
+                na_val = _parse_fin_val(fin.get("net_assets", None))
+                if na_val is not None and na_val > max_net_assets: return False
             if emp_min > 0 or emp_max > 0:
                 emp_s = fin.get("employees","")
                 if emp_s:
@@ -759,18 +763,10 @@ def run_job(job):
                 for s in c.get("sic_codes", []) if s
             )
             for o in rows_data:
-                name = appt = ""; dir_age = None
+                name = appt = ""
                 if o:
                     name = " ".join(reversed([p.strip() for p in o.get("name","").split(",")]))
                     appt = o.get("appointed_on","")
-                    dob = o.get("date_of_birth", {})
-                    dob_year = dob.get("year"); dob_month = dob.get("month")
-                    if dob_year:
-                        try:
-                            dir_age = today.year - int(dob_year) - (
-                                1 if (today.month < int(dob_month)) else 0
-                            ) if dob_month else today.year - int(dob_year)
-                        except: dir_age = None
                 first_n, last_n = split_director_name(name)
                 ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
                 li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {linkedin_company_keyword(company_name)}")
@@ -789,14 +785,6 @@ def run_job(job):
                     try: return int(str(s).strip()) if s else None
                     except: return None
 
-                # Director age filter — skip if outside requested range
-                # If dir_age is None (no DOB on record), only skip if a filter is set
-                if dir_age_min > 0 or dir_age_max > 0:
-                    if dir_age is None:
-                        continue  # can't verify age — exclude if filter is active
-                    if dir_age_min > 0 and dir_age < dir_age_min: continue
-                    if dir_age_max > 0 and dir_age > dir_age_max: continue
-
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
                     "Company": company_name, "Type": {"ltd": "LTD", "llp": "LLP", "plc": "PLC", "private-limited-guarant-nsc": "LTD", "private-unlimited": "LTD"}.get(c.get("company_type","").lower(), c.get("company_type","").upper()),
@@ -808,7 +796,7 @@ def run_job(job):
                     "Cash at Bank": _parse_numeric(fin.get("cash_at_bank","")),
                     "Employees": _parse_emp(fin.get("employees","")),
                     "Accounts Date": fin.get("accounts_date",""),
-                    "Dir. Appointed": appt, "Dir. Age": dir_age, "Accountant": fin.get("accountant",""),
+                    "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
                     "Registered Address": addr_str,
                     "Business Address": fin.get("business_address",""),
                     "CH Link": ch_url, "LinkedIn": li_url,
@@ -915,7 +903,6 @@ def run_job(job):
         _company_types_str = ", ".join([t.upper() for t in company_types]) if company_types else "All"
         _age_str = f"{min_age}yr+" if min_age and not max_age else (f"{min_age}–{max_age}yrs" if min_age and max_age else "Any")
         _emp_str = f"{emp_min}–{emp_max}" if (emp_min or emp_max) else "Any"
-        _dir_age_str = f"{dir_age_min}–{dir_age_max}" if (dir_age_min or dir_age_max) else "Any"
         criteria = {
             "Location": location,
             "Industries": ", ".join(sic_labels),
@@ -923,8 +910,8 @@ def run_job(job):
             "Min age": _age_str,
             "Exclude dormant": "Yes" if excl_dormant else "No",
             "Min net assets": f"£{min_net_assets:,}" if min_net_assets else "None",
+            "Max net assets": f"£{max_net_assets:,}" if max_net_assets else "None",
             "Employees": _emp_str,
-            "Director age": _dir_age_str,
             "Fetch financials": "Yes" if fetch_fin_flag else "No",
             "One contact per company": "Yes" if one_per_co else "No",
             "Companies found": f"{total:,}",
