@@ -363,35 +363,18 @@ def calc_score(fin):
     if ca and ca > 200_000: score += 1
     return score
 
-def fetch_all_for_sic(sic_code, base_params, api_key):
-    """Fetch all companies for a SIC code without a company_type filter
-    (the Companies House advanced-search endpoint silently returns only
-    'ltd' when any company_type value is passed, regardless of what is
-    requested). All types are fetched and then filtered locally against
-    the user's requested types."""
+def _fetch_one_type(sic_code, base_params, api_key, company_type_value):
+    """Fetch all pages for a single company_type value. The Companies House
+    advanced-search endpoint does not reliably honour comma-separated
+    company_type values (e.g. 'ltd,llp') — only the first type tends to be
+    returned — so each type must be requested separately and merged by the
+    caller."""
     auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
     headers = {"Authorization": auth}
-
-    # Build params WITHOUT company_type — apply local filter after fetch
-    params_base = {k: v for k, v in base_params.items() if k != "company_type"}
+    params_base = {**base_params}
     if sic_code: params_base["sic_codes"] = sic_code
-
-    # Determine which types to keep (from the original request)
-    requested_types_raw = base_params.get("company_type", "")
-    requested_types = {t.strip().lower() for t in requested_types_raw.split(",") if t.strip()} if requested_types_raw else set()
-
-    # LTD aliases — API returns these variant strings for companies that are
-    # effectively limited companies; treat them all as 'ltd' for filter purposes
-    _LTD_ALIASES = {"private-limited-guarant-nsc", "private-unlimited",
-                    "private-limited-guarant-nsc-limited-exemption",
-                    "old-public-company", "private-limited-shares-section-30-exemption"}
-
-    def _type_matches(ct_raw):
-        ct = ct_raw.lower()
-        if ct in requested_types: return True
-        if "ltd" in requested_types and ct in _LTD_ALIASES: return True
-        return False
-
+    if company_type_value: params_base["company_type"] = company_type_value
+    elif "company_type" in params_base: del params_base["company_type"]
     items = []; start = 0; total = None
     while True:
         params = {**params_base, "size": 100, "start_index": start}
@@ -408,17 +391,31 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
                 if r.status_code != 429: break
         if r.status_code not in (200,): break
         data = r.json()
-        batch = data.get("items", data.get("companies", []))
-        if total is None: total = data.get("hits", data.get("total_results", 0))
+        batch = data.get("items", data.get("companies",[]))
+        if total is None: total = data.get("hits", data.get("total_results",0))
         if not batch: break
-        raw_batch_size = len(batch)  # capture BEFORE filtering — needed for correct pagination
-        # Filter locally by requested company types (if any were specified)
-        if requested_types:
-            batch = [c for c in batch if _type_matches(c.get("company_type", ""))]
         items.extend(batch)
-        start += raw_batch_size  # advance by RAW count, not filtered count
+        start += len(batch)
         if start >= (total or 0) or start >= 5000: break
     return items
+
+def fetch_all_for_sic(sic_code, base_params, api_key):
+    """Fetch all companies for a SIC code, looping over each requested
+    company_type separately (see _fetch_one_type) and merging/de-duplicating
+    the results by company_number."""
+    requested_types = base_params.get("company_type", "")
+    type_list = [t.strip() for t in requested_types.split(",") if t.strip()] if requested_types else [None]
+
+    seen_numbers = set()
+    merged = []
+    for ct in type_list:
+        batch_items = _fetch_one_type(sic_code, base_params, api_key, ct)
+        for c in batch_items:
+            num = c.get("company_number")
+            if num and num in seen_numbers: continue
+            if num: seen_numbers.add(num)
+            merged.append(c)
+    return merged
 
 def write_status(status):
     try:
@@ -760,10 +757,18 @@ def run_job(job):
                 for s in c.get("sic_codes", []) if s
             )
             for o in rows_data:
-                name = appt = ""
+                name = appt = ""; dir_age = None
                 if o:
                     name = " ".join(reversed([p.strip() for p in o.get("name","").split(",")]))
                     appt = o.get("appointed_on","")
+                    dob = o.get("date_of_birth", {})
+                    dob_year = dob.get("year"); dob_month = dob.get("month")
+                    if dob_year:
+                        try:
+                            dir_age = today.year - int(dob_year) - (
+                                1 if (today.month < int(dob_month)) else 0
+                            ) if dob_month else today.year - int(dob_year)
+                        except: dir_age = None
                 first_n, last_n = split_director_name(name)
                 ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{num}"
                 li_url = "https://www.linkedin.com/search/results/people/?keywords=" + requests.utils.quote(f"{first_n} {last_n} {linkedin_company_keyword(company_name)}")
@@ -793,7 +798,7 @@ def run_job(job):
                     "Cash at Bank": _parse_numeric(fin.get("cash_at_bank","")),
                     "Employees": _parse_emp(fin.get("employees","")),
                     "Accounts Date": fin.get("accounts_date",""),
-                    "Dir. Appointed": appt, "Accountant": fin.get("accountant",""),
+                    "Dir. Appointed": appt, "Dir. Age": dir_age, "Accountant": fin.get("accountant",""),
                     "Registered Address": addr_str,
                     "Business Address": fin.get("business_address",""),
                     "CH Link": ch_url, "LinkedIn": li_url,
