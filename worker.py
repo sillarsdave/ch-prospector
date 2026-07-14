@@ -641,7 +641,15 @@ def run_job(job):
             get director fetches, saving ~90% of director API calls."""
             if excl_dormant and "dormant" in c.get("company_status","").lower(): return False
             if excl_dormant and fin.get("is_dormant", False): return False
-            if min_net_assets > 0:
+
+            # LLPs found via keyword search are exempt from the net assets
+            # filter entirely — most file PDF accounts (no iXBRL data), so
+            # applying a net-assets threshold would silently drop nearly all
+            # of them. We'd rather surface them (with Net Assets shown as
+            # "Unavailable") than filter them out unseen.
+            na_exempt = (c.get("company_type","").lower() == "llp" and c.get("_matched_keyword"))
+
+            if min_net_assets > 0 and not na_exempt:
                 na_val = _parse_fin_val(fin.get("net_assets", None))
                 if na_val is not None:
                     if na_val < min_net_assets: return False
@@ -652,7 +660,7 @@ def run_job(job):
                     if not (ca_val is not None and ca_val >= min_net_assets and
                             ta_val is not None and ta_val >= min_net_assets):
                         return False
-            if max_net_assets > 0:
+            if max_net_assets > 0 and not na_exempt:
                 na_val = _parse_fin_val(fin.get("net_assets", None))
                 if na_val is not None and na_val > max_net_assets: return False
             if emp_min > 0 or emp_max > 0:
@@ -875,6 +883,11 @@ def run_job(job):
                     try: return int(str(s).strip()) if s else None
                     except: return None
 
+                _na_exempt_no_data = (
+                    c.get("company_type","").lower() == "llp" and c.get("_matched_keyword")
+                    and _parse_numeric(fin.get("net_assets","")) is None
+                )
+
                 rows.append({
                     "Score": score_str, "First Name": first_n, "Surname": last_n,
                     "Company": company_name, "Type": {"ltd": "LTD", "llp": "LLP", "plc": "PLC", "private-limited-guarant-nsc": "LTD", "private-unlimited": "LTD"}.get(c.get("company_type","").lower(), c.get("company_type","").upper()),
@@ -883,6 +896,7 @@ def run_job(job):
                     "Current Assets": _parse_numeric(fin.get("current_assets","")),
                     "Total Assets": _parse_numeric(fin.get("total_assets","")),
                     "Net Assets": _parse_numeric(fin.get("net_assets","")),
+                    "_net_assets_unavailable": _na_exempt_no_data,
                     "Cash at Bank": _parse_numeric(fin.get("cash_at_bank","")),
                     "Employees": _parse_emp(fin.get("employees","")),
                     "Accounts Date": fin.get("accounts_date",""),
@@ -901,12 +915,17 @@ def run_job(job):
         import base64
 
         df = pd.DataFrame(rows)
-        # Sort by net assets descending (numeric now so sorts correctly)
+        # Sort by net assets descending (numeric now so sorts correctly) —
+        # done BEFORE swapping in the "Unavailable" text below, so the sort
+        # never has to compare strings against numbers.
         if "Net Assets" in df.columns and len(df) > 0:
             df = df.sort_values("Net Assets", ascending=False, na_position="last").reset_index(drop=True)
+        if "_net_assets_unavailable" in df.columns and len(df) > 0 and df["_net_assets_unavailable"].any():
+            df["Net Assets"] = df["Net Assets"].astype(object)
+            df.loc[df["_net_assets_unavailable"] == True, "Net Assets"] = "Unavailable"
         wb = Workbook(); ws = wb.active; ws.title = "Prospects"
         _addr_cols = [c for c in ["Registered Address", "Business Address"] if c in df.columns]
-        base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn"] + _addr_cols]
+        base_cols = [c for c in df.columns if c not in ["CH Link","LinkedIn","_net_assets_unavailable"] + _addr_cols]
         headers_xl = base_cols + ["CH company","Officers","LinkedIn"] + _addr_cols
         CURRENCY_COLS = {"Total Assets","Net Assets","Fixed Assets","Current Assets","Cash at Bank"}
         NUMBER_COLS = {"Employees","Age"}
@@ -927,7 +946,7 @@ def run_job(job):
                 cell = ws.cell(row=rn, column=ci, value=val)
                 cell.fill = fill; cell.font = Font(name="Arial", size=9)
                 cell.alignment = Alignment(horizontal="left", vertical="center")
-                if h in CURRENCY_COLS and val is not None:
+                if h in CURRENCY_COLS and isinstance(val, (int, float)):
                     cell.number_format = '£#,##0;-£#,##0'
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 elif h in NUMBER_COLS and val is not None:
@@ -1026,7 +1045,7 @@ def run_job(job):
         csv_df["CH company"] = df["CH Link"]
         csv_df["Officers"] = df["CH Link"].apply(lambda x: x+"/officers")
         csv_df["LinkedIn search"] = df["LinkedIn"]
-        csv_df = csv_df.drop(columns=["CH Link","LinkedIn"])
+        csv_df = csv_df.drop(columns=["CH Link","LinkedIn"] + (["_net_assets_unavailable"] if "_net_assets_unavailable" in csv_df.columns else []))
         csv_str = csv_df.to_csv(index=False)
 
         # Save results to Redis FIRST (download fallback, 7-day expiry)
