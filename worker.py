@@ -417,6 +417,57 @@ def fetch_all_for_sic(sic_code, base_params, api_key):
             merged.append(c)
     return merged
 
+def _fetch_one_keyword_type(keyword, base_params, api_key, company_type_value):
+    """Fetch all pages for a single keyword + company_type combination, using
+    company_name_includes instead of sic_codes. This is the only way to find
+    companies (notably most LLPs) that don't carry a SIC code and are
+    therefore invisible to the SIC-based search above. Note: company_name_includes
+    matches whole words, not partial/fuzzy text — 'Accountant' will not match
+    'Accountants', so callers should pass each word form they care about."""
+    auth = "Basic " + b64encode(f"{api_key}:".encode()).decode()
+    headers = {"Authorization": auth}
+    params_base = {k: v for k, v in base_params.items() if k != "sic_codes"}
+    params_base["company_name_includes"] = keyword
+    if company_type_value: params_base["company_type"] = company_type_value
+    elif "company_type" in params_base: del params_base["company_type"]
+    items = []; start = 0; total = None
+    while True:
+        params = {**params_base, "size": 100, "start_index": start}
+        _rl.wait_if_needed()
+        r = requests.get(API_BASE + "/advanced-search/companies",
+                        params=params, headers=headers, timeout=(5, 10))
+        if r.status_code == 429:
+            for _attempt in range(3):
+                time.sleep(5 * (_attempt + 1))
+                _rl.wait_if_needed()
+                r = requests.get(API_BASE + "/advanced-search/companies",
+                                params=params, headers=headers, timeout=(5, 10))
+                if r.status_code != 429: break
+        if r.status_code not in (200,): break
+        data = r.json()
+        batch = data.get("items", data.get("companies", []))
+        if total is None: total = data.get("hits", data.get("total_results", 0))
+        if not batch: break
+        items.extend(batch)
+        start += len(batch)
+        if start >= (total or 0) or start >= 5000: break
+    return items
+
+def fetch_all_for_keyword(keyword, base_params, api_key, keyword_types):
+    """Fetch and merge results for one keyword across each requested company
+    type, tagging each company with which keyword found it (used later to
+    populate the Category column when there's no SIC-derived category)."""
+    seen_numbers = set()
+    merged = []
+    for ct in keyword_types:
+        for c in _fetch_one_keyword_type(keyword, base_params, api_key, ct):
+            num = c.get("company_number")
+            if num and num in seen_numbers: continue
+            if num: seen_numbers.add(num)
+            c["_matched_keyword"] = keyword
+            merged.append(c)
+    return merged
+
 def write_status(status):
     try:
         r = get_redis()
@@ -443,7 +494,7 @@ def run_job(job):
     emp_max        = job.get("emp_max", 0)
     one_per_co     = job.get("one_per_company", True)
     linkedin_hyperlinks = job.get("linkedin_hyperlinks", True)
-    company_types  = job.get("company_types", ["ltd","llp"])
+    company_types  = job.get("company_types", ["ltd","plc"])
 
     # Clear any cancel flag from previous job
     try:
@@ -517,6 +568,27 @@ def run_job(job):
             if (i + 1) % 5 == 0 or (i + 1) == len(selected_sics):
                 write_status({"running": True,
                               "stage": f"Searching SIC codes ({i+1}/{len(selected_sics)} done)...",
+                              "dir_done": 0, "fin_done": 0, "total": 0,
+                              "started_at": start_time, "job_id": job.get("job_id",""),
+                              "error": None, "ready_to_email": False})
+
+        keywords = job.get("keywords", [])
+        if keywords:
+            keyword_types = list(dict.fromkeys((company_types or []) + ["llp"]))
+            kw_base_params = {"location": location, "company_status": "active"}
+            for ki, kw in enumerate(keywords):
+                if is_cancelled(job.get("job_id","")):
+                    print(f"[{datetime.now()}] Job cancelled during keyword search")
+                    break
+                kw_items = fetch_all_for_keyword(kw, kw_base_params, api_key, keyword_types)
+                added = 0
+                for c in kw_items:
+                    num = c.get("company_number","")
+                    if num and num not in seen:
+                        seen.add(num); all_items.append(c); added += 1
+                log_event(f"Keyword '{kw}' — {len(kw_items):,} found, {added:,} new (not already found via SIC)")
+                write_status({"running": True,
+                              "stage": f"Searching keywords ({ki+1}/{len(keywords)} done)...",
                               "dir_done": 0, "fin_done": 0, "total": 0,
                               "started_at": start_time, "job_id": job.get("job_id",""),
                               "error": None, "ready_to_email": False})
@@ -764,6 +836,8 @@ def run_job(job):
                 SIC_LOOKUP.get(s, f"SIC {s}")
                 for s in c.get("sic_codes", []) if s
             )
+            if not category and c.get("_matched_keyword"):
+                category = f"Keyword: {c['_matched_keyword']}"
             for o in rows_data:
                 name = appt = ""; dir_age = None
                 if o:
@@ -923,6 +997,7 @@ def run_job(job):
         criteria = {
             "Location": location,
             "Industries": ", ".join(sic_labels),
+            "Keywords": ", ".join(keywords) if keywords else "None",
             "Company types": _company_types_str,
             "Min age": _age_str,
             "Exclude dormant": "Yes" if excl_dormant else "No",

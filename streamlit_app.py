@@ -423,8 +423,26 @@ with st.sidebar:
 
     st.markdown("### \U0001f3e2 Company Type")
     type_ltd = st.checkbox("Private Limited (Ltd)", value=True)
-    type_llp = st.checkbox("LLP", value=True)
     type_plc = st.checkbox("Public (PLC)", value=False)
+    type_llp = False
+    st.caption("LLP isn't offered here: Companies House's API doesn't reliably return LLP "
+               "results when an industry (SIC code) filter is applied, so an LLP search "
+               "comes back empty in practice — this is a data-source limitation, not something "
+               "this app can filter around.")
+
+    st.markdown("### \U0001f511 Additional Keywords (optional)")
+    keywords_raw = st.text_input(
+        "Company name contains any of (comma-separated)", value="",
+        placeholder="e.g. Accountant, Accountants, Accountancy, Accounts, Recruitment",
+        help="Runs a supplementary search for companies whose name contains any of these "
+             "words, in addition to the industry search above. This is the only way to catch "
+             "companies — notably most LLPs — that don't carry a SIC code and are otherwise "
+             "invisible to the industry search. Always includes LLPs for this part of the "
+             "search, regardless of the Company Type selection above. Matching is whole-word, "
+             "not fuzzy, so plurals and variants (Accountant / Accountants / Accountancy) need "
+             "to be listed separately if you want all of them."
+    )
+    keyword_list = [k.strip() for k in keywords_raw.split(",") if k.strip()]
 
     st.markdown("### \u2605 Quality Filters")
     excl_dormant = st.checkbox("Exclude dormant", value=True)
@@ -479,7 +497,6 @@ if search_btn:
             sic_labels_for_job = selected_sic_labels
         selected_types = []
         if type_ltd: selected_types.append("ltd")
-        if type_llp: selected_types.append("llp")
         if type_plc: selected_types.append("plc")
 
         job = {
@@ -489,6 +506,7 @@ if search_btn:
             "sic_labels": sic_labels_for_job,
             "all_industries": all_industries_mode,
             "company_types": selected_types,
+            "keywords": keyword_list,
             "fetch_financials": fetch_financials_flag,
             "min_age": int(min_age),
             "max_age": int(max_age),
@@ -832,7 +850,6 @@ if results:
             ws_crit = wb.create_sheet("Search Criteria")
             _co_types = []
             if type_ltd: _co_types.append("LTD")
-            if type_llp: _co_types.append("LLP")
             if type_plc: _co_types.append("PLC")
             _age_str = f"{int(min_age)}yr+" if min_age and not max_age else (f"{int(min_age)}-{int(max_age)}yrs" if min_age and max_age else "Any")
             _emp_str = f"{int(emp_min)}-{int(emp_max)}" if (emp_min or emp_max) else "Any"
@@ -840,6 +857,7 @@ if results:
             criteria_data = {
                 "Location": location,
                 "Industries": ", ".join(selected_sic_labels),
+                "Keywords": ", ".join(keyword_list) if keyword_list else "None",
                 "Company types": ", ".join(_co_types) if _co_types else "All",
                 "Min age": _age_str,
                 "Exclude dormant": "Yes" if excl_dormant else "No",
